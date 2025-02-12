@@ -4,6 +4,10 @@ import os
 import supabase
 from time import sleep
 from supabase import create_client, Client
+from dotenv import load_dotenv
+
+load_dotenv()
+print(os.environ.get("OPENAI_API_KEY"))
 
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 

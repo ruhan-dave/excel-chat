@@ -1,11 +1,11 @@
-import { useState } from 'react'
+// import { useState } from 'react'
 import './App.css'
-import { Button } from './components/ui/button'
+// import { Button } from './components/ui/button'
 import { Card } from './components/ui/card'
 import FileUploader from './components/ui/fileuploader'
 
 function App() {
-  const [count, setCount] = useState(0)
+  // const [count, setCount] = useState(0)
 
   return (
     <>

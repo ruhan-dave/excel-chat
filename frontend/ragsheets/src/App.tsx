@@ -3,6 +3,7 @@ import './App.css'
 // import { Button } from './components/ui/button'
 import { Card } from './components/ui/card'
 import FileUploader from './components/ui/fileuploader'
+import PromptInput from './components/ui/promptinput'
 
 function App() {
   // const [count, setCount] = useState(0)
@@ -24,6 +25,7 @@ function App() {
       <Card className="p-20">
          <h6>Upload your excel</h6>
          <FileUploader />
+         <PromptInput />
       </Card>
       </main>
 

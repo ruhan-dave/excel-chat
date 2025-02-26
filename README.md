@@ -2,7 +2,7 @@
 
 > A repository to handle queries for excel sheets uploaded by the user to an agent.
 
-### How to run
+### How to run: (notebooks and scripts)
 
 - Ensure that the following keys are set on your environment:
 ```
@@ -34,4 +34,22 @@ pip install -r requirements.txt
 - The script is a copy of the notebook. To run the rag script, 
 ```
 python rag.py
+```
+
+
+### How to run the application
+
+To run the application:
+
+- Frontend:
+```
+npm install 
+npm run dev
+```
+
+- Backend
+Make a virtual environment, and then run
+```
+pip install -r requirements.txt
+fastapi dev main.py
 ```

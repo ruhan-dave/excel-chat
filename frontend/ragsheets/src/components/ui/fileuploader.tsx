@@ -2,13 +2,15 @@ import { ChangeEvent, useState } from "react";
 import { Input } from "./input";
 import { Button } from "./button";
 import axios from "axios";
+import BackdropWithSpinner from "./backdropWithSpinner";
 
-type UploadStatus = "idle" | "uploading" | "success" | "error";
 
 export default function FileUploader() {
 
     const [file, setFile] = useState<File | null>(null);
-    const [status, setStatus] = useState<UploadStatus>('idle');
+
+    const [isLoading, setLoading] = useState(false);
+    const [response, setResponse] = useState("");
 
     const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
         if(event.target.files) {
@@ -20,66 +22,30 @@ export default function FileUploader() {
         if(!file)
             return;
 
-        setStatus('uploading');
+        setLoading(true);
         const formData = new FormData();
-        formData.append('file', file);
-
-        try 
-        {
-            await axios.post("https://httpbin.org/post", formData, {
-                headers: {
-                    'Content-Type': 'multipart/form-data',
-                }
-            });
-            
-            setStatus('success');
-        }
-        catch
-        {
-            setStatus('error');
-        }
-    }
-
-    let fileDetails = null;
-    if(file)
-    {
-        fileDetails = (
-            <div className="mb-4 text-sm">
-                <p>File Name = {file.name}</p>
-                <p>Size: {(file.size / 1024).toFixed(2)} KB</p>
-                <p>Type: {file.type}</p>
-            </div>
-        );
-    }
-
-    let fileSubmitButton = null;
-    if(file && status !== "uploading")
-    {
-        fileSubmitButton = <Button onClick={handleFileUpload}>upload</Button>
-    }
-
-    let statusSuccessMessage = null;
-    if(status === 'success')
-    {
-        statusSuccessMessage = <p className = "mt-2 text-sm"> File uploaded successfully!</p>;
-    }
-
-    let statusErrorMessage = null;
-    if(status === 'error')
-    {
-        statusErrorMessage = <p className="mt-2 text-sm">Upload failed. Please try again.</p>
+        formData.append('excelFile', file);
+        const response = await axios.post("http://localhost:8000/upload", formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            }
+        });
+        setResponse(response.data.message);
+        setLoading(false);
+        setFile(null);
     }
 
     return (
-        <div>
+        <div className="py-8 sm:py-8">
             <Input 
                 type="file"
                 onChange={handleFileChange}
                 />
-            {fileDetails}
-            {fileSubmitButton}
-            {statusSuccessMessage}
-            {statusErrorMessage}
+            <Button className="p-6 sm:p-6 rounded-2xl m-8 sm:m-8" onClick={handleFileUpload}>
+                Upload
+            </Button>
+            {response.length > 0 && <p>{response}</p>}
+            {isLoading && <BackdropWithSpinner />}
         </div>
     );
 };

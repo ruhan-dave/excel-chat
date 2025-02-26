@@ -4,8 +4,23 @@ from vectordbservices import VectorDBService
 from queryservices import QueryService
 import pandas as pd
 from io import StringIO, BytesIO
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(root_path='/api')
+
+# list of allowed origins
+origins = [
+    "http://localhost:5173",
+    "http://vcm-45508.vm.duke.edu"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def root():

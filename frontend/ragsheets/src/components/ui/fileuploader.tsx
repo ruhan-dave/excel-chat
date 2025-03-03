@@ -25,7 +25,8 @@ export default function FileUploader() {
         setLoading(true);
         const formData = new FormData();
         formData.append('excelFile', file);
-        const response = await axios.post("http://localhost:8000/upload", formData, {
+	const apiURL = import.meta.env.VITE_API_ENDPOINT;
+        const response = await axios.post(`${apiURL}/upload`, formData, {
             headers: {
                 'Content-Type': 'multipart/form-data',
             }

@@ -15,10 +15,10 @@ const PromptInput = () => {
     const [isLoading, setLoading] = useState(false);
     const [query, setQuery] = useState("");
     const [answer, setAnswer] = useState("");
-
+    const apiURL = import.meta.env.VITE_API_ENDPOINT;
     const submitQuery = async(query: string) => {
         setLoading(true);
-        const response = await axios.get("http://localhost:8000/query", {
+        const response = await axios.get(`${apiURL}/query`, {
             params: {
                 query: query
             }

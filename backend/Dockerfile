@@ -1,5 +1,5 @@
 # Use the official Python image from the Docker Hub
-FROM python:3.10-alpine
+FROM python:3.10.12-slim
 
 # Set the working directory in the container
 WORKDIR /app
@@ -16,5 +16,7 @@ COPY . .
 # Expose port 8000 for the Uvicorn server
 EXPOSE 8000
 
+WORKDIR /app/src
+
 # Define the command to run the Uvicorn server
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

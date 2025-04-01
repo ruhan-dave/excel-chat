@@ -60,7 +60,7 @@ def executing_plan_from_json(df, json_str):
                 args_part = instruction[8:].strip()
                 
                 # Split on comma only if not inside quotes
-                parts = [p.strip().strip("'\"") for p in re.split(r",\s*(?=(?:[^\"'][\"'][^\"'][\"'])[^\"']$)", args_part)]
+                parts = [p.strip().strip("'\"") for p in re.split(r",\s*(?=(?:[^\"']*[\"'][^\"']*[\"'])*[^\"']*$)", args_part)]
                 
                 if len(parts) >= 2:
                     col, year = parts[0], parts[1]
@@ -85,7 +85,7 @@ def executing_plan_from_json(df, json_str):
 
     except Exception as e:
         print(f"❌ Error in execution: {str(e)}")
-        raise
+
 
 # -- Components --
 class ExecutePlanComponent(CustomQueryComponent):

@@ -6,6 +6,9 @@ import pandas as pd
 from io import StringIO, BytesIO
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pipeline import build_query_pipeline
+import os
+from llama_index.llms.cohere import Cohere
 import os
 
 app = FastAPI(root_path='/api')
@@ -45,6 +48,12 @@ async def create_upload_file(excelFile: UploadFile):
 
 @app.get("/query")
 def query_rag(query: str):
-    relevant_documents = QueryService.getTopKDocuments(query, 5)
-    answer = QueryService.promptLLMWithContext(query, relevant_documents)
-    return {"answer": answer}
+    COHERE_API_KEY = os.environ.get("COHERE_KEY")
+    cohere_model = Cohere(
+        model = "command-r-plys",
+        api_key = COHERE_API_KEY,
+        temperature = 0.1,
+        max_tokens = 2000
+    )
+    print(os.listdir())
+    # pipeline = build_query_pipeline(cohere_model, clean)

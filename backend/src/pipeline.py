@@ -87,13 +87,12 @@ def executing_plan_from_json(df, json_str):
         print(f"❌ Error in execution: {str(e)}")
         raise
 
-
 # -- Components --
 class ExecutePlanComponent(CustomQueryComponent):
     _df: pd.DataFrame = PrivateAttr()
 
-    def _init_(self, df):
-        super()._init_()
+    def __init__(self, df):
+        super().__init__()
         self._df = df
 
     def _run_component(self, **kwargs):
@@ -116,8 +115,8 @@ class ClassifyStepComponent(CustomQueryComponent):
     _template: PromptTemplate = PrivateAttr()
     _df: pd.DataFrame = PrivateAttr()
 
-    def _init_(self, cohere_model, template: PromptTemplate, df: pd.DataFrame):
-        super()._init_()
+    def __init__(self, cohere_model, template: PromptTemplate, df: pd.DataFrame):
+        super().__init__()
         self._llm = cohere_model
         self._template = template
         self._df = df

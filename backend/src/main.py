@@ -5,6 +5,8 @@ from queryservices import QueryService
 import pandas as pd
 from io import StringIO, BytesIO
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import os
 
 app = FastAPI(root_path='/api')
 
@@ -22,17 +24,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+UPLOAD_FOLDER = './uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 @app.get("/")
 async def root():
     return {"message": "Hello world!"}
 
 @app.post("/upload/")
-def create_upload_file(excelFile: UploadFile):
-    contents = excelFile.file.read()
-    with BytesIO(contents) as file_object:
-        excelFileContents = pd.read_excel(file_object).T.to_string()
-    embeddings, chunks = ExcelService.processExcel(excelFileContents)
-    VectorDBService.upload_embeddings(embeddings, chunks)
+async def create_upload_file(excelFile: UploadFile):
+    if not excelFile.filename.endswith(('.xlsx', '.xls')):
+        return JSONResponse(content={"message": "Invalid file format"}, status_code=400)
+    
+    filepath = os.path.join(UPLOAD_FOLDER, excelFile.filename)
+    with open(filepath, "wb") as f:
+        content = await excelFile.read()
+        f.write(content)
     return {"message" : "File uploaded successfully!"}
 
 

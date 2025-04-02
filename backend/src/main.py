@@ -5,8 +5,17 @@ from queryservices import QueryService
 import pandas as pd
 from io import StringIO, BytesIO
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pipeline import build_query_pipeline
+import os
+from llama_index.llms.cohere import Cohere
+import os
+from dotenv import load_dotenv
+from pathlib import Path
+from classification_template import ClassTemplates
 
 app = FastAPI(root_path='/api')
+load_dotenv()
 
 # list of allowed origins
 origins = [
@@ -22,22 +31,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+UPLOAD_FOLDER = './uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 @app.get("/")
 async def root():
     return {"message": "Hello world!"}
 
 @app.post("/upload/")
-def create_upload_file(excelFile: UploadFile):
-    contents = excelFile.file.read()
-    with BytesIO(contents) as file_object:
-        excelFileContents = pd.read_excel(file_object).T.to_string()
-    embeddings, chunks = ExcelService.processExcel(excelFileContents)
-    VectorDBService.upload_embeddings(embeddings, chunks)
+async def create_upload_file(excelFile: UploadFile):
+    if not excelFile.filename.endswith(('.xlsx', '.xls')):
+        return JSONResponse(content={"message": "Invalid file format"}, status_code=400)
+    
+    filepath = os.path.join(UPLOAD_FOLDER, excelFile.filename)
+    with open(filepath, "wb") as f:
+        content = await excelFile.read()
+        f.write(content)
     return {"message" : "File uploaded successfully!"}
 
 
 @app.get("/query")
 def query_rag(query: str):
-    relevant_documents = QueryService.getTopKDocuments(query, 5)
-    answer = QueryService.promptLLMWithContext(query, relevant_documents)
+    COHERE_API_KEY = os.environ.get("COHERE_KEY")
+    cohere_model = Cohere(
+        model = "command-r-plus",
+        api_key = COHERE_API_KEY,
+        temperature = 0.1,
+        max_tokens = 2000
+    )
+    excel_sheets = os.listdir(UPLOAD_FOLDER)
+
+    # For now, pick the top excel sheet
+    if len(excel_sheets) == 0:
+        return { "error" : "No sheets to look through!"}
+    
+    filename = Path(UPLOAD_FOLDER) / excel_sheets[0]
+    df = pd.read_excel(filename)
+    cleaned_df = ExcelService.clean_dataframe(df)
+    print(query)
+    pipeline = build_query_pipeline(cohere_model, cleaned_df, ClassTemplates.CLASSIFIER_PROMPT)
+    answer = pipeline.run(query_str = query)
     return {"answer": answer}

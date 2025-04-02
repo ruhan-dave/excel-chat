@@ -50,7 +50,7 @@ const PromptInput = () => {
                 <TableBody>
                     {Object.entries(answer).map(([key, value]) => <TableRow key={key}>
                         <TableCell>{key}</TableCell>
-                        <TableCell>{value}</TableCell>
+                        <TableCell>{String(value)}</TableCell>
                     </TableRow>
                     )}
                 </TableBody>

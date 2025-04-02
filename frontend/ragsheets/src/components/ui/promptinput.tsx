@@ -3,6 +3,14 @@ import { Button } from "./button";
 import { useState } from "react";
 import axios from "axios";
 import BackdropWithSpinner from "./backdropWithSpinner";
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+  } from "@/components/ui/table"
 
 const MessageIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" className="lucide lucide-send-horizontal">
@@ -14,7 +22,7 @@ const MessageIcon = () => (
 const PromptInput = () => {
     const [isLoading, setLoading] = useState(false);
     const [query, setQuery] = useState("");
-    const [answer, setAnswer] = useState("");
+    const [answer, setAnswer] = useState({});
     const apiURL = import.meta.env.VITE_API_ENDPOINT;
     const submitQuery = async(query: string) => {
         setLoading(true);
@@ -27,6 +35,29 @@ const PromptInput = () => {
         setLoading(false);
     }
 
+    let answerBlock = null;
+
+    if(Object.keys(answer).length > 0)
+    {
+        answerBlock = (
+            <Table>
+                <TableHeader>
+                    <TableRow>
+                        <TableHead className="text-center">Step</TableHead>
+                        <TableHead className="text-center">Answer</TableHead>
+                    </TableRow>
+                </TableHeader>
+                <TableBody>
+                    {Object.entries(answer).map(([key, value]) => <TableRow key={key}>
+                        <TableCell>{key}</TableCell>
+                        <TableCell>{value}</TableCell>
+                    </TableRow>
+                    )}
+                </TableBody>
+            </Table>
+        );
+    }
+
     return (
         <div className="py-8 sm:py-8">
             <Textarea
@@ -36,7 +67,7 @@ const PromptInput = () => {
             <Button onClick={(_) => submitQuery(query)} className="p-6 sm:p-6 rounded-2xl m-8 sm:m-8">
                 <MessageIcon />
             </Button>
-            {answer.length > 0 && <p>{answer}</p>}
+            {answerBlock}
             {isLoading && <BackdropWithSpinner />}
         </div>
     );

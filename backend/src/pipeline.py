@@ -31,7 +31,6 @@ def retrieving(df, items):
     print("❌ Value not found")
     return [None]
 
-# -- Plan Execution Logic --
 def executing_plan_from_json(df, json_str):
     try:
         parsed = json.loads(json_str)
@@ -42,50 +41,97 @@ def executing_plan_from_json(df, json_str):
             plan = parsed['plan']
         elif 'items' in parsed:
             plan = {
-                f"step{i+1}": f"Retrieve {item.strip()}"
+                f"step{i+1}": {"action": "retrieve", "args": item.split(',')}
                 for i, item in enumerate(parsed['items'])
             }
         else:
             raise ValueError("Invalid JSON format - missing 'plan' or 'items'")
         
         context = {}
+        computed_values = {}  # Store computed step values
 
         for step_name, instruction in plan.items():
-            # Ensure instruction is a string
-            instruction = str(instruction).strip()
             print(f"🔧 Processing step {step_name}: {instruction}")
             
-            if instruction.lower().startswith("retrieve"):
-                # Extract everything after "Retrieve"
-                args_part = instruction[8:].strip()
+            # Handle string instructions (legacy format)
+            if isinstance(instruction, str):
+                instruction = instruction.strip()
+                if instruction.lower().startswith("retrieve"):
+                    args_part = instruction[8:].strip().strip("[]'\"")
+                    parts = [p.strip().strip("'\"") for p in args_part.split(',')]
+                    if len(parts) >= 2:
+                        col, year = parts[0], parts[1]
+                        values = retrieving(df, [col, year])
+                        context[step_name] = values[0] if values else None
+                        computed_values[step_name] = context[step_name]
+                    else:
+                        print(f"⚠️ Could not extract 2 arguments from: {instruction}")
+                        context[step_name] = None
+                continue
+            
+            # Handle structured JSON instructions
+            if isinstance(instruction, dict):
+                action = instruction.get("action", "").lower()
+                args = instruction.get("args", [])
                 
-                # Split on comma only if not inside quotes
-                parts = [p.strip().strip("'\"") for p in re.split(r",\s*(?=(?:[^\"']*[\"'][^\"']*[\"'])*[^\"']*$)", args_part)]
+                # Normalize arguments - split combined strings
+                normalized_args = []
+                for arg in args:
+                    if isinstance(arg, str) and ',' in arg:
+                        normalized_args.extend([x.strip() for x in arg.split(',')])
+                    else:
+                        normalized_args.append(arg.strip() if isinstance(arg, str) else arg)
                 
-                if len(parts) >= 2:
-                    col, year = parts[0], parts[1]
-                    print(f"  Retrieving: column='{col}', year='{year}'")
-                    
-                    # Verify the column and year exist
-                    print(f"  Available columns: {df.columns.tolist()}")
-                    print(f"  Available index: {df.index.tolist()}")
-                    
-                    values = retrieving(df, [col, year])
-                    context[step_name] = values[0] if values else None
-                    print(f"  Retrieved value: {context[step_name]}")
+                # Retrieve operation
+                if action == "retrieve":
+                    if len(normalized_args) >= 2:
+                        col, year = normalized_args[0], normalized_args[1]
+                        values = retrieving(df, [col, year])
+                        context[step_name] = values[0] if values else None
+                        computed_values[step_name] = context[step_name]
+                    else:
+                        print(f"⚠️ Invalid retrieve args: {args} (normalized: {normalized_args})")
+                        context[step_name] = None
+                
+                # Calculation operations
+                elif action in ["add", "subtract", "multiply", "divide", "return_percentage"]:
+                    if len(args) == 2:
+                        arg1, arg2 = args
+                        val1 = computed_values.get(arg1.strip()) if isinstance(arg1, str) and arg1.startswith('step') else float(arg1) if str(arg1).replace('.','',1).isdigit() else None
+                        val2 = computed_values.get(arg2.strip()) if isinstance(arg2, str) and arg2.startswith('step') else float(arg2) if str(arg2).replace('.','',1).isdigit() else None
+                        
+                        if val1 is not None and val2 is not None:
+                            if action == "add":
+                                context[step_name] = add(val1, val2)
+                            elif action == "subtract":
+                                context[step_name] = subtract(val1, val2)
+                            elif action == "multiply":
+                                context[step_name] = multiply(val1, val2)
+                            elif action == "divide":
+                                context[step_name] = divide(val1, val2)
+                            elif action == "return_percentage":
+                                context[step_name] = return_percentage(val1, val2)
+                            computed_values[step_name] = context[step_name]
+                        else:
+                            print(f"⚠️ Missing values for calculation: {arg1}={val1}, {arg2}={val2}")
+                            context[step_name] = None
+                    else:
+                        print(f"⚠️ Invalid calculation args: {args}")
+                        context[step_name] = None
                 else:
-                    print(f"⚠️ Could not extract 2 arguments from: {instruction}")
+                    print(f"⚠️ Unsupported action: {action}")
                     context[step_name] = None
-            else:
-                # [Keep existing calculation logic]
-                pass
+                continue
+            
+            print(f"⚠️ Unknown instruction format for step {step_name}")
+            context[step_name] = None
 
         print("✅ Final context:", context)
         return context
 
     except Exception as e:
         print(f"❌ Error in execution: {str(e)}")
-
+        raise
 
 # -- Components --
 class ExecutePlanComponent(CustomQueryComponent):
@@ -179,7 +225,6 @@ def build_query_pipeline(cohere_model, df, classification_template):
     classify = ClassifyStepComponent(cohere_model, classification_template, df)
     execute = ExecutePlanComponent(df)
     
-    # Explicitly connect components
     pipeline = QueryPipeline()
     pipeline.add_modules({
         "classify": classify,

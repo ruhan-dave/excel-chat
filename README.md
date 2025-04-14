@@ -13,7 +13,8 @@ npm install
 npm run dev
 ```
 
-- Backend
+- Backend:
+
 Make a virtual environment, and then run
 ```
 pip install -r requirements.txt
@@ -34,5 +35,5 @@ VITE_API_ENDPOINT = "http://vcm-47087.vm.duke.edu/api"
 The first part of the URL indicates what is the base url of the deployed application which can accept backend requests. Once that is edited, run
 
 ```
-sudo docker compose -f docker_compose.yml up --build
+sudo docker compose -f docker_compose.yml up --build -d
 ```

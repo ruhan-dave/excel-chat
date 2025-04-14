@@ -17,8 +17,9 @@ npm run dev
 
 Make a virtual environment, and then run
 ```
+cd backend
 pip install -r requirements.txt
-cd backend/src
+cd src
 uvicorn main:app --reload
 ```
 

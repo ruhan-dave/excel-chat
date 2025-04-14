@@ -18,7 +18,8 @@ npm run dev
 Make a virtual environment, and then run
 ```
 pip install -r requirements.txt
-fastapi dev main.py
+cd backend/src
+uvicorn main:app --reload
 ```
 
 - Make sure you have the following key:

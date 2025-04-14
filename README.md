@@ -2,40 +2,6 @@
 
 > A repository to handle queries for excel sheets uploaded by the user to an agent.
 
-### How to run: (notebooks and scripts)
-
-- Ensure that the following keys are set on your environment:
-```
-OPENAI_API_KEY
-SUPABASE_KEY
-SUPABASE_URL
-```
-
-- Ensure that you have created necessary tables in Supabase (Vector DB) using table and function definitions found [here](https://www.aispaceship.io/docs/rag-beginner-guide/create-embeddings).
-
-- Create a virtual environment, and install dependencies:
-```
-python -m venv .venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-- To run the notebook, ensure that you install a kernel:
-
-    ```
-    python -m ipykernel install --user --name RAG
-    ```
-    -  Start jupyter notebook:
-    ```
-    jupyter-notebook
-    ```
-    - And select the `RAG` kernel during runtime.
-
-- The script is a copy of the notebook. To run the rag script, 
-```
-python rag.py
-```
-
 
 ### How to run the application
 
@@ -52,4 +18,21 @@ Make a virtual environment, and then run
 ```
 pip install -r requirements.txt
 fastapi dev main.py
+```
+
+- Make sure you have the following key:
+```
+COHERE_KEY
+```
+You can add the key in the folder `backend/src/.env` and the application should run without errors.
+
+- Deployment
+On a VM instance, once you have added the `.env` file, first make sure you update the API url in `frontend/ragsheets/.env.production`:
+```bash
+VITE_API_ENDPOINT = "http://vcm-47087.vm.duke.edu/api"
+```
+The first part of the URL indicates what is the base url of the deployed application which can accept backend requests. Once that is edited, run
+
+```
+sudo docker compose -f docker_compose.yml up --build
 ```

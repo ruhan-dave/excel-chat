@@ -1,12 +1,16 @@
 from llama_index.core.query_pipeline import QueryPipeline, CustomQueryComponent
 from llama_index.core.llms import ChatMessage, MessageRole
-from llama_index.llms.cohere import Cohere
+# from llama_index.llms.openai import OpenAI  # Commented out for Cohere migration
+# from llama_index.llms.cohere import Cohere  # LlamaIndex Cohere is outdated
+import cohere
 from llama_index.core.prompts import PromptTemplate
 from pydantic import PrivateAttr
+from typing import Any
 
 import pandas as pd
 import json
 import re
+import os
 
 # -- Arithmetic Functions --
 add = lambda a, b: a + b
@@ -157,13 +161,16 @@ class ExecutePlanComponent(CustomQueryComponent):
     def _output_keys(self): return {"executed_plan"}
 
 class ClassifyStepComponent(CustomQueryComponent):
-    _llm: Cohere = PrivateAttr()
+    # _llm: OpenAI = PrivateAttr()  # Commented out for Cohere migration
+    # _llm: Cohere = PrivateAttr()  # LlamaIndex Cohere is outdated
+    _llm: Any = PrivateAttr()  # Using Cohere SDK ClientV2
     _template: PromptTemplate = PrivateAttr()
     _df: pd.DataFrame = PrivateAttr()
 
-    def __init__(self, cohere_model, template: PromptTemplate, df: pd.DataFrame):
+    # def __init__(self, openai_model, template: PromptTemplate, df: pd.DataFrame):  # Commented out for Cohere migration
+    def __init__(self, cohere_client, template: PromptTemplate, df: pd.DataFrame):
         super().__init__()
-        self._llm = cohere_model
+        self._llm = cohere_client  # This is now a cohere.ClientV2 instance
         self._template = template
         self._df = df
 
@@ -175,23 +182,35 @@ class ClassifyStepComponent(CustomQueryComponent):
             available_years=", ".join(str(year) for year in self._df.columns)
         )
         
-        # 2. Prepare messages (use lowercase role)
-        messages = [
-            ChatMessage(role=MessageRole.USER, content=formatted_prompt)  # Changed to use ChatMessage
-        ]
+        print(f"🔍 Formatted prompt: {formatted_prompt[:500]}...")  # Debug
         
-        # 3. Get response from command-r
-        response = self._llm.chat(
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.1
-        )
-        
-        # 4. Process response (command-r has different response structure)
+        # 2. Get response from Cohere using SDK directly
         try:
-            content = response.message.content
-            if isinstance(content, list):
-                content = content[0].text if hasattr(content[0], 'text') else str(content[0])
+            response = self._llm.chat(
+                model="command-r7b-12-2024",
+                messages=[{"role": "user", "content": formatted_prompt}],
+                temperature=0.1
+            )
+            print(f"🤖 Cohere response: {response}")  # Debug
+        except Exception as e:
+            print(f"❌ Cohere API error: {str(e)}")
+            raise
+        
+        # 3. Process Cohere response
+        try:
+            content = response.message.content[0].text
+            print(f"📝 Raw content type: {type(content)}")
+            print(f"📝 Raw content: {content}")
+            
+            # Extract JSON from markdown if present
+            if "```json" in content:
+                json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(1)
+            elif "```" in content:
+                json_match = re.search(r'```\n(.*?)\n```', content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(1)
             
             # Ensure valid JSON
             parsed = json.loads(content)
@@ -221,8 +240,9 @@ class ClassifyStepComponent(CustomQueryComponent):
         return {"json_str"}
     
 # -- Build Pipeline Function --
-def build_query_pipeline(cohere_model, df, classification_template):
-    classify = ClassifyStepComponent(cohere_model, classification_template, df)
+# def build_query_pipeline(openai_model, df, classification_template):  # Commented out for Cohere migration
+def build_query_pipeline(cohere_client, df, classification_template):
+    classify = ClassifyStepComponent(cohere_client, classification_template, df)
     execute = ExecutePlanComponent(df)
     
     pipeline = QueryPipeline()
@@ -233,3 +253,54 @@ def build_query_pipeline(cohere_model, df, classification_template):
     pipeline.add_chain(["classify", "execute"])
     
     return pipeline
+
+# -- Response Generation Function --
+# def generate_user_friendly_response(openai_model, original_query, json_result):  # Commented out for Cohere migration
+def generate_user_friendly_response(cohere_client, original_query, json_result):
+    """
+    Generate a user-friendly response from the JSON result using Cohere SDK
+    """
+    try:
+        print("🚀 Starting generate_user_friendly_response...")
+        # Create a prompt for Cohere to generate a natural language response
+        response_prompt = f"""
+Based on the user's question and the calculated results, provide a clear, natural language response.
+
+User's Question: {original_query}
+
+Calculated Results (JSON):
+{json.dumps(json_result, indent=2)}
+
+Instructions:
+1. Provide a clear, conversational response that directly answers the user's question
+2. Include the specific numerical values with proper formatting (currency symbols, percentages, etc.)
+3. Briefly explain how the answer was derived by referencing the calculation steps
+4. Use a friendly, professional tone
+5. If multiple values were calculated, present them clearly
+
+Response:
+"""
+        
+        print("📤 Calling Cohere API for friendly response...")
+        response = cohere_client.chat(
+            model="command-r7b-12-2024",
+            messages=[{"role": "user", "content": response_prompt}],
+            temperature=0.3,
+            max_tokens=500
+        )
+        print("📥 Cohere API response received")
+        
+        content = response.message.content[0].text
+        print(f"✅ Friendly response generated: {content[:100]}...")
+        
+        # Extract content from markdown if present
+        if "```" in content:
+            # Remove markdown code blocks
+            content = re.sub(r'```(?:json)?\n?', '', content)
+            content = re.sub(r'```$', '', content).strip()
+        
+        return content
+        
+    except Exception as e:
+        print(f"Error generating user-friendly response: {str(e)}")
+        return f"Based on the calculations: {json_result}"

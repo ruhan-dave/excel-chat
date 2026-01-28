@@ -23,38 +23,60 @@ const PromptInput = () => {
     const [isLoading, setLoading] = useState(false);
     const [query, setQuery] = useState("");
     const [answer, setAnswer] = useState({});
+    const [friendlyResponse, setFriendlyResponse] = useState("");
     const apiURL = import.meta.env.VITE_API_ENDPOINT;
     const submitQuery = async(query: string) => {
         setLoading(true);
-        const response = await axios.get(`${apiURL}/query`, {
-            params: {
-                query: query
-            }
-        });
-        setAnswer(response.data.answer);
+        try {
+            const response = await axios.get(`${apiURL}/query`, {
+                params: {
+                    query: query
+                },
+                timeout: 120000  // 2 minute timeout for LLM processing
+            });
+            setAnswer(response.data.answer);
+            setFriendlyResponse(response.data.friendly_response);
+        } catch (error) {
+            console.error("Query failed:", error);
+            setFriendlyResponse("Error: Failed to get response from server. Please check if the file is uploaded correctly.");
+        }
         setLoading(false);
     }
 
     let answerBlock = null;
+    let friendlyBlock = null;
 
     if(Object.keys(answer).length > 0)
     {
         answerBlock = (
-            <Table>
-                <TableHeader>
-                    <TableRow>
-                        <TableHead className="text-center">Step</TableHead>
-                        <TableHead className="text-center">Answer</TableHead>
-                    </TableRow>
-                </TableHeader>
-                <TableBody>
-                    {Object.entries(answer).map(([key, value]) => <TableRow key={key}>
-                        <TableCell>{key}</TableCell>
-                        <TableCell>{String(value)}</TableCell>
-                    </TableRow>
-                    )}
-                </TableBody>
-            </Table>
+            <div className="mb-8">
+                <h3 className="text-lg font-semibold mb-4">Calculation Steps:</h3>
+                <Table>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead className="text-center">Step</TableHead>
+                            <TableHead className="text-center">Answer</TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                        {Object.entries(answer).map(([key, value]) => <TableRow key={key}>
+                            <TableCell>{key}</TableCell>
+                            <TableCell>{String(value)}</TableCell>
+                        </TableRow>
+                        )}
+                    </TableBody>
+                </Table>
+            </div>
+        );
+    }
+
+    if(friendlyResponse)
+    {
+        friendlyBlock = (
+            <div className="bg-blue-50 p-6 rounded-lg">
+                <h3 className="text-lg font-semibold mb-4 text-blue-900">Answer:</h3>
+                <div className="text-blue-800 whitespace-pre-wrap">{friendlyResponse}</div>
+            </div>
         );
     }
 
@@ -67,6 +89,7 @@ const PromptInput = () => {
             <Button onClick={(_) => submitQuery(query)} className="p-6 sm:p-6 rounded-2xl m-8 sm:m-8">
                 <MessageIcon />
             </Button>
+            {friendlyBlock}
             {answerBlock}
             {isLoading && <BackdropWithSpinner />}
         </div>

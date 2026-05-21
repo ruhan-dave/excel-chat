@@ -175,16 +175,13 @@ def query_rag(query: str):
         print(f"Available fields: {cleaned_df.index.tolist()}")
         print(f"Available years: {cleaned_df.columns.tolist()}")
         
+        # Build Pydantic AI pipeline (llm_client and template are now ignored, kept for compatibility)
         pipeline = build_query_pipeline(client, cleaned_df, PromptTemplate(ClassTemplates.CLASSIFIER_PROMPT))
-        json_answer = pipeline.run(query_str = query)
         
-        # Generate user-friendly response
-        friendly_response = generate_user_friendly_response(client, query, json_answer)
+        # Run the pipeline with the query (returns a callable, not a pipeline object)
+        result = pipeline(query)
         
-        return {
-            "answer": json_answer,
-            "friendly_response": friendly_response
-        }
+        return result
     except Exception as e:
         print(f"Error in query_rag: {str(e)}")
         import traceback

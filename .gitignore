@@ -136,6 +136,9 @@ ENV/
 env.bak/
 venv.bak/
 
+/Users/ruhwang/Desktop/AI/spring2025_courses/capstone/excel-chat/backend/src/.env
+/Users/ruhwang/Desktop/AI/spring2025_courses/capstone/excel-chat/.env
+
 # Spyder project settings
 .spyderproject
 .spyproject

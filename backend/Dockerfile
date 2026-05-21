@@ -18,5 +18,8 @@ EXPOSE 8000
 
 WORKDIR /app/src
 
+# Default OpenRouter base URL (override via env at runtime)
+ENV OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+
 # Define the command to run the Uvicorn server
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

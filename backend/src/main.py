@@ -8,12 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pipeline import build_query_pipeline, generate_user_friendly_response
 import os
-# from llama_index.llms.openai import OpenAI  # Commented out for Cohere migration
-# from llama_index.llms.cohere import Cohere  # LlamaIndex Cohere is outdated
-import cohere
+from openai import OpenAI
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.llms import ChatMessage, MessageRole
-import os
 from dotenv import load_dotenv
 from pathlib import Path
 from classification_template import ClassTemplates
@@ -85,22 +82,25 @@ async def create_upload_file(excelFile: UploadFile):
 #     except Exception as e:
 #         return {"error": str(e)}
 
-@app.get("/test-cohere")
-def test_cohere():
+@app.get("/test-openrouter")
+def test_openrouter():
     try:
-        COHERE_API_KEY = os.environ.get("COHERE_API_KEY")
-        if not COHERE_API_KEY:
-            return {"error": "Cohere API key not found"}
+        OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+        if not OPENROUTER_API_KEY:
+            return {"error": "OpenRouter API key not found"}
         
-        co = cohere.ClientV2(api_key=COHERE_API_KEY)
+        client = OpenAI(
+            base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            api_key=OPENROUTER_API_KEY
+        )
         
-        response = co.chat(
-            model="command-r7b-12-2024",
+        response = client.chat.completions.create(
+            model="deepseek/deepseek-v4-flash",
             messages=[{"role": "user", "content": "Return JSON: {\"test\": \"value\"}"}],
             temperature=0.1,
             max_tokens=100
         )
-        content = response.message.content[0].text
+        content = response.choices[0].message.content
         
         return {
             "response_type": type(content).__name__,
@@ -154,11 +154,14 @@ def test_cohere():
 @app.get("/query")
 def query_rag(query: str):
     try:
-        COHERE_API_KEY = os.environ.get("COHERE_API_KEY")
-        if not COHERE_API_KEY:
-            return {"error": "Cohere API key not found"}
+        OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+        if not OPENROUTER_API_KEY:
+            return {"error": "OpenRouter API key not found"}
         
-        co = cohere.ClientV2(api_key=COHERE_API_KEY)
+        client = OpenAI(
+            base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            api_key=OPENROUTER_API_KEY
+        )
         excel_sheets = os.listdir(UPLOAD_FOLDER)
 
         # For now, pick the top excel sheet
@@ -172,11 +175,11 @@ def query_rag(query: str):
         print(f"Available fields: {cleaned_df.index.tolist()}")
         print(f"Available years: {cleaned_df.columns.tolist()}")
         
-        pipeline = build_query_pipeline(co, cleaned_df, PromptTemplate(ClassTemplates.CLASSIFIER_PROMPT))
+        pipeline = build_query_pipeline(client, cleaned_df, PromptTemplate(ClassTemplates.CLASSIFIER_PROMPT))
         json_answer = pipeline.run(query_str = query)
         
         # Generate user-friendly response
-        friendly_response = generate_user_friendly_response(co, query, json_answer)
+        friendly_response = generate_user_friendly_response(client, query, json_answer)
         
         return {
             "answer": json_answer,

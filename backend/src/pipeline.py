@@ -2,7 +2,7 @@ from llama_index.core.query_pipeline import QueryPipeline, CustomQueryComponent
 from llama_index.core.llms import ChatMessage, MessageRole
 # from llama_index.llms.openai import OpenAI  # Commented out for Cohere migration
 # from llama_index.llms.cohere import Cohere  # LlamaIndex Cohere is outdated
-import cohere
+from openai import OpenAI
 from llama_index.core.prompts import PromptTemplate
 from pydantic import PrivateAttr
 from typing import Any
@@ -161,16 +161,13 @@ class ExecutePlanComponent(CustomQueryComponent):
     def _output_keys(self): return {"executed_plan"}
 
 class ClassifyStepComponent(CustomQueryComponent):
-    # _llm: OpenAI = PrivateAttr()  # Commented out for Cohere migration
-    # _llm: Cohere = PrivateAttr()  # LlamaIndex Cohere is outdated
-    _llm: Any = PrivateAttr()  # Using Cohere SDK ClientV2
+    _llm: Any = PrivateAttr()  # OpenAI-compatible client (OpenRouter)
     _template: PromptTemplate = PrivateAttr()
     _df: pd.DataFrame = PrivateAttr()
 
-    # def __init__(self, openai_model, template: PromptTemplate, df: pd.DataFrame):  # Commented out for Cohere migration
-    def __init__(self, cohere_client, template: PromptTemplate, df: pd.DataFrame):
+    def __init__(self, llm_client, template: PromptTemplate, df: pd.DataFrame):
         super().__init__()
-        self._llm = cohere_client  # This is now a cohere.ClientV2 instance
+        self._llm = llm_client  # OpenAI-compatible client (OpenRouter)
         self._template = template
         self._df = df
 
@@ -184,21 +181,21 @@ class ClassifyStepComponent(CustomQueryComponent):
         
         print(f"🔍 Formatted prompt: {formatted_prompt[:500]}...")  # Debug
         
-        # 2. Get response from Cohere using SDK directly
+        # 2. Get response from LLM using OpenRouter
         try:
-            response = self._llm.chat(
-                model="command-r7b-12-2024",
+            response = self._llm.chat.completions.create(
+                model="deepseek/deepseek-v4-flash",
                 messages=[{"role": "user", "content": formatted_prompt}],
                 temperature=0.1
             )
-            print(f"🤖 Cohere response: {response}")  # Debug
+            print(f"🤖 LLM response: {response}")  # Debug
         except Exception as e:
-            print(f"❌ Cohere API error: {str(e)}")
+            print(f"❌ LLM API error: {str(e)}")
             raise
         
-        # 3. Process Cohere response
+        # 3. Process LLM response
         try:
-            content = response.message.content[0].text
+            content = response.choices[0].message.content
             print(f"📝 Raw content type: {type(content)}")
             print(f"📝 Raw content: {content}")
             
@@ -240,9 +237,8 @@ class ClassifyStepComponent(CustomQueryComponent):
         return {"json_str"}
     
 # -- Build Pipeline Function --
-# def build_query_pipeline(openai_model, df, classification_template):  # Commented out for Cohere migration
-def build_query_pipeline(cohere_client, df, classification_template):
-    classify = ClassifyStepComponent(cohere_client, classification_template, df)
+def build_query_pipeline(llm_client, df, classification_template):
+    classify = ClassifyStepComponent(llm_client, classification_template, df)
     execute = ExecutePlanComponent(df)
     
     pipeline = QueryPipeline()
@@ -255,14 +251,13 @@ def build_query_pipeline(cohere_client, df, classification_template):
     return pipeline
 
 # -- Response Generation Function --
-# def generate_user_friendly_response(openai_model, original_query, json_result):  # Commented out for Cohere migration
-def generate_user_friendly_response(cohere_client, original_query, json_result):
+def generate_user_friendly_response(llm_client, original_query, json_result):
     """
-    Generate a user-friendly response from the JSON result using Cohere SDK
+    Generate a user-friendly response from the JSON result using OpenRouter
     """
     try:
         print("🚀 Starting generate_user_friendly_response...")
-        # Create a prompt for Cohere to generate a natural language response
+        # Create a prompt for the LLM to generate a natural language response
         response_prompt = f"""
 Based on the user's question and the calculated results, provide a clear, natural language response.
 
@@ -281,16 +276,16 @@ Instructions:
 Response:
 """
         
-        print("📤 Calling Cohere API for friendly response...")
-        response = cohere_client.chat(
-            model="command-r7b-12-2024",
+        print("📤 Calling LLM API for friendly response...")
+        response = llm_client.chat.completions.create(
+            model="deepseek/deepseek-v4-flash",
             messages=[{"role": "user", "content": response_prompt}],
             temperature=0.3,
             max_tokens=500
         )
-        print("📥 Cohere API response received")
+        print("📥 LLM API response received")
         
-        content = response.message.content[0].text
+        content = response.choices[0].message.content
         print(f"✅ Friendly response generated: {content[:100]}...")
         
         # Extract content from markdown if present

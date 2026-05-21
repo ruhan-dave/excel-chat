@@ -5,7 +5,7 @@ import chromadb
 from chroma_client import get_db_client
 from dotenv import load_dotenv
 import os
-import cohere
+from openai import OpenAI
 
 
 class QueryService:
@@ -57,22 +57,24 @@ class QueryService:
 
     @classmethod
     def promptLLMWithContext(self, query, relevant_documents):
-        documents_excel = [
-            {"data": {"title": "chunk 0", "snippet" : relevant_document}} for relevant_document in relevant_documents
-        ]
+        # Build context from relevant documents and inject into the prompt
+        context = "\n\n".join([
+            f"Document chunk {i}:\n{doc}" for i, doc in enumerate(relevant_documents)
+        ])
+
         load_dotenv()
-        COHERE_API_KEY = os.environ.get("COHERE_KEY")
-        ch = cohere.ClientV2(api_key = COHERE_API_KEY)
-        response = ch.chat(
-            model = "command-r-08-2024",
-            messages = [
-                {"role": "system", "content": self.PREAMBLE},
+        OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+        OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
+        response = client.chat.completions.create(
+            model="deepseek/deepseek-v4-flash",
+            messages=[
+                {"role": "system", "content": self.PREAMBLE + "\n\nUse the following documents to answer the user's question:\n" + context},
                 {"role": "user", "content": query}
             ],
-            documents = documents_excel,
-            temperature = self.TEMPERATURE
+            temperature=self.TEMPERATURE
         )
-        answer = response.message.content[0].text
+        answer = response.choices[0].message.content
         return answer
 
 if __name__ == "__main__":

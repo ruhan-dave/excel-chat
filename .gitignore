@@ -138,6 +138,7 @@ venv.bak/
 
 /Users/ruhwang/Desktop/AI/spring2025_courses/capstone/excel-chat/backend/src/.env
 /Users/ruhwang/Desktop/AI/spring2025_courses/capstone/excel-chat/.env
+chromadb.ipynb
 
 # Spyder project settings
 .spyderproject

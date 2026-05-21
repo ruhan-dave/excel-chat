@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import pandas as pd
+import pydantic_monty
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.models.openai import OpenAIModel
@@ -144,6 +145,68 @@ def return_percentage_tool(ctx: RunContext[PipelineDeps], a: float, b: float) ->
     return str((a / b) * 100)
 
 
+def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
+    """
+    Execute Python code in a secure sandbox using pydantic-monty.
+    
+    This tool allows the agent to perform mathematical operations or custom calculations
+    that are not covered by the basic toolkit. The sandbox provides a secure environment
+    for executing Python code written by the LLM.
+    
+    The code should set a variable named 'result' or 'result_' to return a value.
+    
+    Example usage:
+        code = "result = 100 * 1.05 ** 3"
+    
+    Available in the sandbox:
+    - Basic Python syntax and operators
+    - Common math functions (via monty's built-in math module)
+    - Computed values from previous steps (via context)
+    """
+    try:
+        # Create type definitions for the sandbox
+        # This allows monty to provide better type checking
+        type_defs = """
+import math
+from typing import Any
+
+# Computed values from the pipeline will be injected
+"""
+        
+        # Add computed values to type definitions
+        for key, value in ctx.deps.computed_values.items():
+            if isinstance(value, (int, float)):
+                type_defs += f"{key}: float = 0.0\n"
+            else:
+                type_defs += f"{key}: Any = None\n"
+        
+        # Prepare external functions that the sandbox can call
+        external_functions = {}
+        
+        # Create the Monty instance
+        m = pydantic_monty.Monty(
+            code,
+            inputs=[],
+            script_name="sandbox.py",
+            type_check=False,  # Disable type checking for flexibility
+            type_check_stubs=type_defs,
+        )
+        
+        # Run the code synchronously
+        output = m.run_sync(
+            inputs={},
+            external_functions=external_functions,
+        )
+        
+        # Return the output
+        if output is None:
+            return "Code executed successfully (no output)"
+        return str(output)
+        
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {str(e)}"
+
+
 # ============================================================================
 # Tool Prepare Functions (dynamic schema customization)
 # ============================================================================
@@ -220,7 +283,8 @@ You have tools to retrieve values from a DataFrame and perform arithmetic.
 Execute the user's query step by step:
 1. Call retrieve/extract_val to get needed values
 2. Call arithmetic tools (add, subtract, multiply, divide, return_percentage) to compute results
-3. Return the final answer as structured data
+3. For complex calculations not covered by basic tools, use execute_python_code to run Python code in a secure sandbox
+4. Return the final answer as structured data
 
 If a step fails, note it and continue with what you can.
 """
@@ -238,6 +302,7 @@ If a step fails, note it and continue with what you can.
             subtract_tool,
             divide_tool,
             return_percentage_tool,
+            execute_python_code,
         ],
         model_settings={"temperature": 0.1},
     )

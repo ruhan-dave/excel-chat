@@ -153,19 +153,41 @@ def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
     that are not covered by the basic toolkit. The sandbox provides a secure environment
     for executing Python code written by the LLM.
     
-    The code should set a variable named 'result' or 'result_' to return a value.
+    The code should use a `return` statement to return the result.
     
     Example usage:
-        code = "result = 100 * 1.05 ** 3"
+        code = "return 10 + 20"
+        code = "return (100 * 1.05) ** 3"
     
     Available in the sandbox:
     - Basic Python syntax and operators
     - Common math functions (via monty's built-in math module)
     - Computed values from previous steps (via context)
     """
+    import asyncio
+    import io
+    import sys
+    
     try:
+        # Modify code to ensure it has a return statement if it doesn't
+        # If code assigns to 'result' or 'result_', add a return statement
+        code_stripped = code.strip()
+        if not code_stripped.startswith("return"):
+            # Check if it assigns to result variable
+            if "result " in code or "result=" in code:
+                # Extract the last line that assigns to result
+                lines = code.split("\n")
+                for line in reversed(lines):
+                    if "result" in line and ("=" in line or "result" in line):
+                        # Convert assignment to return
+                        if "=" in line:
+                            expr = line.split("=", 1)[1].strip()
+                            code = f"return {expr}"
+                        else:
+                            code = f"return {line}"
+                        break
+        
         # Create type definitions for the sandbox
-        # This allows monty to provide better type checking
         type_defs = """
 import math
 from typing import Any
@@ -188,20 +210,39 @@ from typing import Any
             code,
             inputs=[],
             script_name="sandbox.py",
-            type_check=False,  # Disable type checking for flexibility
+            type_check=False,
             type_check_stubs=type_defs,
         )
         
-        # Run the code synchronously
-        output = m.run_sync(
-            inputs={},
-            external_functions=external_functions,
-        )
+        # Capture stdout
+        old_stdout = sys.stdout
+        stdout_capture = io.StringIO()
         
-        # Return the output
-        if output is None:
-            return "Code executed successfully (no output)"
-        return str(output)
+        try:
+            sys.stdout = stdout_capture
+            
+            # Run the code asynchronously
+            async def run_monty():
+                return await m.run_async(
+                    inputs={},
+                    external_functions=external_functions,
+                )
+            
+            output = asyncio.run(run_monty())
+            
+            # Get captured stdout
+            stdout_output = stdout_capture.getvalue()
+            
+            # Return output from return statement or stdout
+            if output is not None:
+                return str(output)
+            elif stdout_output:
+                return stdout_output.strip()
+            else:
+                return "Code executed successfully (no output)"
+                
+        finally:
+            sys.stdout = old_stdout
         
     except Exception as e:
         return f"ERROR: {type(e).__name__}: {str(e)}"

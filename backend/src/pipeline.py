@@ -252,7 +252,7 @@ from typing import Any
 # Tool Prepare Functions (dynamic schema customization)
 # ============================================================================
 
-def _prepare_retrieve_tool(
+async def _prepare_retrieve_tool(
     ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
     """Inject available fields/years into the retrieve tool schema."""
@@ -267,11 +267,11 @@ def _prepare_retrieve_tool(
     return tool_def
 
 
-def _prepare_extract_val_tool(
+async def _prepare_extract_val_tool(
     ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
     """Inject available fields/years into the extract_val tool schema."""
-    return _prepare_retrieve_tool(ctx, tool_def)
+    return await _prepare_retrieve_tool(ctx, tool_def)
 
 
 # ============================================================================
@@ -305,8 +305,8 @@ Always use exact field names and years from the available lists.
 
     return Agent(
         model,
-        output_type=QueryPlan,
-        instructions=instructions,
+        result_type=QueryPlan,
+        system_prompt=instructions,
         model_settings={"temperature": 0.1},
     )
 
@@ -318,7 +318,7 @@ def build_executor_agent(df: pd.DataFrame) -> Agent[PipelineDeps, ExecutionResul
     retrieve_t = Tool(retrieve, prepare=_prepare_retrieve_tool)
     extract_t = Tool(extract_val, prepare=_prepare_extract_val_tool)
 
-    instructions = """You are a financial data execution engine.
+    system_prompt = """You are a financial data execution engine.
 
 You have tools to retrieve values from a DataFrame and perform arithmetic.
 Execute the user's query step by step:
@@ -333,8 +333,8 @@ If a step fails, note it and continue with what you can.
     return Agent(
         model,
         deps_type=PipelineDeps,
-        output_type=ExecutionResult,
-        instructions=instructions,
+        result_type=ExecutionResult,
+        system_prompt=system_prompt,
         tools=[
             retrieve_t,
             extract_t,
@@ -355,8 +355,8 @@ def build_responder_agent() -> Agent[None, str]:
 
     return Agent(
         model,
-        output_type=str,
-        instructions="""You are a helpful financial assistant.
+        result_type=str,
+        system_prompt="""You are a helpful financial assistant.
 
 Given a user's question and the calculated results, provide a clear, conversational
 response that directly answers the question. Include specific numerical values
@@ -388,7 +388,7 @@ def build_query_pipeline(
         # Step 1: Plan
         planner = build_planner_agent(df)
         plan_result = planner.run_sync(query)
-        plan: QueryPlan = plan_result.output
+        plan: QueryPlan = plan_result.data
         print("📋 Plan:", json.dumps(plan.model_dump(), indent=2))
 
         # Step 2: Execute
@@ -418,7 +418,7 @@ def build_query_pipeline(
             exec_prompt = query
 
         exec_result = executor.run_sync(exec_prompt, deps=deps)
-        execution: ExecutionResult = exec_result.output
+        execution: ExecutionResult = exec_result.data
         print("✅ Execution:", json.dumps(execution.model_dump(), indent=2))
 
         # Step 3: Respond
@@ -430,7 +430,7 @@ Execution Results:
 
 Provide a clear, natural language response."""
         resp_result = responder.run_sync(resp_prompt)
-        friendly: str = resp_result.output
+        friendly: str = resp_result.data
         print(f"📝 Response: {friendly[:100]}...")
 
         return {
@@ -456,7 +456,7 @@ Calculated Results:
 
 Provide a clear, natural language response."""
     result = responder.run_sync(prompt)
-    return result.output
+    return result.data
 
 
 # ============================================================================

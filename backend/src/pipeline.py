@@ -19,15 +19,31 @@ subtract = lambda a, b: a - b
 divide = lambda a, b: a / b if (a is not None and b not in [0, None]) else None
 return_percentage = lambda a, b: (a / b) * 100 if (a is not None and b not in [0, None]) else None
 
+# -- Safe Compute Helpers --
+_SAFE_BUILTINS = {
+    "abs": abs, "round": round, "min": min, "max": max,
+    "sum": sum, "len": len, "sorted": sorted,
+    "float": float, "int": int,
+}
+
+def _safe_eval(expr: str, variables: dict[str, float]) -> Any:
+    """Evaluate a math expression with only retrieved step values and safe builtins."""
+    allowed = {**_SAFE_BUILTINS, **variables}
+    try:
+        return eval(expr, {"__builtins__": {}}, allowed)
+    except Exception as e:
+        print(f"⚠️ Compute expression error: {e} | expr={expr} | vars={variables}")
+        return None
+
 # -- Helper Functions --
 def extract_vals_from_df(df, col, year):
     return float(df.loc[col, year]) if col in df.index and year in df.columns else None
 
-def retrieving(df, items):
-    print(f"🔍 Attempting to retrieve: {items}")
+def retrieving(sheets, items):
+    print(f"Attempting to retrieve: {items}")
     if len(items) == 2:
         col, year = items[0].strip(), items[1].strip()
-        print(f"🔍 Looking for: '{col}' in index ({col in df.index}), '{year}' in columns ({year in df.columns})")
+        print(f"Looking for: '{col}' in index ({col in df.index}), '{year}' in columns ({year in df.columns})")
         if col in df.index and year in df.columns:
             val = df.loc[col, year]
             print(f"✅ Found value: {val}")
@@ -35,10 +51,10 @@ def retrieving(df, items):
     print("❌ Value not found")
     return [None]
 
-def executing_plan_from_json(df, json_str):
+def executing_plan_from_json(sheets, json_str):
     try:
         parsed = json.loads(json_str)
-        print("🔨 Parsed JSON:", parsed)
+        print("Parsed JSON:", parsed)
         
         # Extract plan from different possible JSON structures
         if 'plan' in parsed:
@@ -55,7 +71,7 @@ def executing_plan_from_json(df, json_str):
         computed_values = {}  # Store computed step values
 
         for step_name, instruction in plan.items():
-            print(f"🔧 Processing step {step_name}: {instruction}")
+            print(f"Processing step {step_name}: {instruction}")
             
             # Handle string instructions (legacy format)
             if isinstance(instruction, str):
@@ -89,14 +105,24 @@ def executing_plan_from_json(df, json_str):
                 # Retrieve operation
                 if action == "retrieve":
                     if len(normalized_args) >= 2:
-                        col, year = normalized_args[0], normalized_args[1]
-                        values = retrieving(df, [col, year])
+                        values = retrieving(sheets, normalized_args)
                         context[step_name] = values[0] if values else None
                         computed_values[step_name] = context[step_name]
                     else:
                         print(f"⚠️ Invalid retrieve args: {args} (normalized: {normalized_args})")
                         context[step_name] = None
                 
+                # Compute operation - evaluate a Python expression using step values
+                elif action == "compute":
+                    expr = instruction.get("expr", "")
+                    if expr:
+                        result = _safe_eval(expr, computed_values)
+                        context[step_name] = result
+                        computed_values[step_name] = result
+                    else:
+                        print(f"⚠️ Compute action missing 'expr' field: {instruction}")
+                        context[step_name] = None
+
                 # Calculation operations
                 elif action in ["add", "subtract", "multiply", "divide", "return_percentage"]:
                     if len(args) == 2:
@@ -139,16 +165,16 @@ def executing_plan_from_json(df, json_str):
 
 # -- Components --
 class ExecutePlanComponent(CustomQueryComponent):
-    _df: pd.DataFrame = PrivateAttr()
+    _sheets: dict[str, pd.DataFrame] = PrivateAttr()
 
-    def __init__(self, df):
+    def __init__(self, sheets: dict[str, pd.DataFrame]):
         super().__init__()
-        self._df = df
+        self._sheets = sheets
 
     def _run_component(self, **kwargs):
-        print("⚡ ExecutePlanComponent received:", kwargs)  # Debug input
+        print("ExecutePlanComponent received:", kwargs)  # Debug input
         try:
-            result = executing_plan_from_json(self._df, kwargs["json_str"])
+            result = executing_plan_from_json(self._sheets, kwargs["json_str"])
             print("✅ Execution result:", result)
             return {"executed_plan": result}
         except Exception as e:
@@ -163,32 +189,47 @@ class ExecutePlanComponent(CustomQueryComponent):
 class ClassifyStepComponent(CustomQueryComponent):
     _llm: Any = PrivateAttr()  # OpenAI-compatible client (OpenRouter)
     _template: PromptTemplate = PrivateAttr()
-    _df: pd.DataFrame = PrivateAttr()
+    _sheets: dict[str, pd.DataFrame] = PrivateAttr()
 
-    def __init__(self, llm_client, template: PromptTemplate, df: pd.DataFrame):
+    def __init__(self, llm_client, template: PromptTemplate, sheets: dict[str, pd.DataFrame]):
         super().__init__()
-        self._llm = llm_client  # OpenAI-compatible client (OpenRouter)
+        self._llm = llm_client
         self._template = template
-        self._df = df
+        self._sheets = sheets
 
     def _run_component(self, **kwargs):
+        # Build per-sheet metadata for the prompt
+        sheet_descriptions = []
+        all_fields = set()
+        all_years = set()
+        for sheet_name, df in self._sheets.items():
+            fields = [str(f) for f in df.index]
+            years = [str(y) for y in df.columns]
+            all_fields.update(fields)
+            all_years.update(years)
+            sheet_descriptions.append(
+                f"Sheet '{sheet_name}': fields = [{', '.join(fields)}], years = [{', '.join(years)}]"
+            )
+
         # 1. Format the prompt with safe string conversion
         formatted_prompt = self._template.format(
             query=kwargs["query_str"],
-            available_fields=", ".join(str(field) for field in self._df.index),
-            available_years=", ".join(str(year) for year in self._df.columns)
+            available_sheets="\n".join(sheet_descriptions),
+            available_fields=", ".join(sorted(all_fields)),
+            available_years=", ".join(sorted(all_years))
         )
         
-        print(f"🔍 Formatted prompt: {formatted_prompt[:500]}...")  # Debug
+        print(f"Formatted prompt: {formatted_prompt[:500]}...")  # Debug
         
-        # 2. Get response from LLM using OpenRouter
+        # 2. Get response from LLM using OpenRouter with sufficient timeout
         try:
             response = self._llm.chat.completions.create(
                 model="deepseek/deepseek-v4-flash",
                 messages=[{"role": "user", "content": formatted_prompt}],
-                temperature=0.1
+                temperature=0.1,
+                timeout=60.0  # 60 second timeout for classification
             )
-            print(f"🤖 LLM response: {response}")  # Debug
+            print(f"LLM response: {response}")  # Debug
         except Exception as e:
             print(f"❌ LLM API error: {str(e)}")
             raise
@@ -196,8 +237,8 @@ class ClassifyStepComponent(CustomQueryComponent):
         # 3. Process LLM response
         try:
             content = response.choices[0].message.content
-            print(f"📝 Raw content type: {type(content)}")
-            print(f"📝 Raw content: {content}")
+            print(f"Raw content type: {type(content)}")
+            print(f"Raw content: {content}")
             
             # Extract JSON from markdown if present
             if "```json" in content:
@@ -211,7 +252,7 @@ class ClassifyStepComponent(CustomQueryComponent):
             
             # Ensure valid JSON
             parsed = json.loads(content)
-            print("📥 Raw LLM output:\n", parsed)
+            print("Raw LLM output:\n", parsed)
             
             # Transform if needed (same as before)
             if "plan" not in parsed:
@@ -237,9 +278,9 @@ class ClassifyStepComponent(CustomQueryComponent):
         return {"json_str"}
     
 # -- Build Pipeline Function --
-def build_query_pipeline(llm_client, df, classification_template):
-    classify = ClassifyStepComponent(llm_client, classification_template, df)
-    execute = ExecutePlanComponent(df)
+def build_query_pipeline(llm_client, sheets, classification_template):
+    classify = ClassifyStepComponent(llm_client, classification_template, sheets)
+    execute = ExecutePlanComponent(sheets)
     
     pipeline = QueryPipeline()
     pipeline.add_modules({
@@ -253,49 +294,74 @@ def build_query_pipeline(llm_client, df, classification_template):
 # -- Response Generation Function --
 def generate_user_friendly_response(llm_client, original_query, json_result):
     """
-    Generate a user-friendly response from the JSON result using OpenRouter
+    Generate a user-friendly response from the JSON result using OpenRouter.
+    Implements retry logic that only retries on actual failures, not timeouts.
     """
-    try:
-        print("🚀 Starting generate_user_friendly_response...")
-        # Create a prompt for the LLM to generate a natural language response
-        response_prompt = f"""
-Based on the user's question and the calculated results, provide a clear, natural language response.
+    max_retries = 1
+    timeout_seconds = 60  # 60 seconds - sufficient time for LLM processing
+    
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"Starting generate_user_friendly_response (attempt {attempt + 1}/{max_retries + 1})...")
+            
+            # Create a prompt for the LLM to generate a natural language response
+            response_prompt = f"""
+            Based on the user's question and the calculated results, provide a clear, natural language response.
 
-User's Question: {original_query}
+            User's Question: {original_query}
 
-Calculated Results (JSON):
-{json.dumps(json_result, indent=2)}
+            Calculated Results (JSON):
+            {json.dumps(json_result, indent=2)}
 
-Instructions:
-1. Provide a clear, conversational response that directly answers the user's question
-2. Include the specific numerical values with proper formatting (currency symbols, percentages, etc.)
-3. Briefly explain how the answer was derived by referencing the calculation steps
-4. Use a friendly, professional tone
-5. If multiple values were calculated, present them clearly
+            Instructions:
+            1. Provide a clear, conversational response that directly answers the user's question
+            2. Include the specific numerical values with proper formatting (currency symbols, percentages, etc.)
+            3. Briefly explain how the answer was derived by referencing the calculation steps
+            4. Use a patient, clear, professional tone
+            5. If multiple values were calculated, present them clearly
 
-Response:
-"""
-        
-        print("📤 Calling LLM API for friendly response...")
-        response = llm_client.chat.completions.create(
-            model="deepseek/deepseek-v4-flash",
-            messages=[{"role": "user", "content": response_prompt}],
-            temperature=0.3,
-            max_tokens=500
-        )
-        print("📥 LLM API response received")
-        
-        content = response.choices[0].message.content
-        print(f"✅ Friendly response generated: {content[:100]}...")
-        
-        # Extract content from markdown if present
-        if "```" in content:
-            # Remove markdown code blocks
-            content = re.sub(r'```(?:json)?\n?', '', content)
-            content = re.sub(r'```$', '', content).strip()
-        
-        return content
-        
-    except Exception as e:
-        print(f"Error generating user-friendly response: {str(e)}")
-        return f"Based on the calculations: {json_result}"
+            Response:
+            """
+            
+            print("Calling LLM API for natural language response...")
+            response = llm_client.chat.completions.create(
+                model="deepseek/deepseek-v4-flash",
+                messages=[{"role": "user", "content": response_prompt}],
+                temperature=0.3,
+                max_tokens=500,
+                timeout=timeout_seconds
+            )
+            print("LLM API response received")
+            
+            content = response.choices[0].message.content
+            print(f"✅ Friendly response generated: {content[:100]}...")
+            
+            # Extract content from markdown if present
+            if "```" in content:
+                # Remove markdown code blocks
+                content = re.sub(r'```(?:json)?\n?', '', content)
+                content = re.sub(r'```$', '', content).strip()
+            
+            return content
+            
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            # Check if it's a timeout error
+            is_timeout = 'timeout' in error_msg.lower() or 'timed out' in error_msg.lower()
+            
+            print(f"❌ Error generating user-friendly response (attempt {attempt + 1}): {error_type}: {error_msg}")
+            
+            # Only retry if it's NOT a timeout error and we haven't exhausted retries
+            if not is_timeout and attempt < max_retries:
+                print(f"Retrying due to non-timeout error...")
+                import time
+                time.sleep(2)  # Brief pause before retry
+                continue
+            elif is_timeout:
+                print(f"Timeout error - will not retry (timeout indicates sufficient wait time)")
+                return f"Response generation took longer than expected. Based on the calculations: {json_result}"
+            else:
+                print(f"❌ Exhausted retries for non-timeout error")
+                return f"Based on the calculations: {json_result}"

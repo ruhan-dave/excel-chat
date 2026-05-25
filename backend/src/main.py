@@ -160,7 +160,8 @@ def query_rag(query: str):
         
         client = OpenAI(
             base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-            api_key=OPENROUTER_API_KEY
+            api_key=OPENROUTER_API_KEY,
+            timeout=60.0  # 60s timeout for all API calls
         )
         excel_sheets = os.listdir(UPLOAD_FOLDER)
 
@@ -171,6 +172,7 @@ def query_rag(query: str):
         filename = Path(UPLOAD_FOLDER) / excel_sheets[0]
         df = pd.read_excel(filename)
         cleaned_df = ExcelService.clean_dataframe(df)
+        
         print(f"Processing query: {query}")
         print(f"Available fields: {cleaned_df.index.tolist()}")
         print(f"Available years: {cleaned_df.columns.tolist()}")

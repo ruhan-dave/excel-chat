@@ -91,6 +91,27 @@ class ExcelService:
         return df
 
 
+    @staticmethod
+    def load_all_sheets(filepath):
+        """
+        Load all sheets from an Excel file, clean each one, and return a dict.
+
+        Returns:
+            dict[str, pd.DataFrame]: {sheet_name: cleaned_dataframe}
+        """
+        xls = pd.ExcelFile(filepath)
+        sheets = {}
+        for sheet_name in xls.sheet_names:
+            raw_df = pd.read_excel(filepath, sheet_name=sheet_name)
+            try:
+                cleaned = ExcelService.clean_dataframe(raw_df)
+                sheets[sheet_name] = cleaned
+                print(f"Loaded sheet '{sheet_name}': {cleaned.shape[0]} fields x {cleaned.shape[1]} years")
+            except ValueError as e:
+                print(f"Skipping sheet '{sheet_name}': {e}")
+        return sheets
+
+
 if __name__ == "__main__":
     # For now, just limited to 1 sheet
     excelPandas = pd.read_excel("../../example_sheets/Detailed_Expense_Breakdown.xlsx", sheet_name='Sheet1')

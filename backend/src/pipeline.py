@@ -21,13 +21,16 @@ from llama_index.core.prompts import PromptTemplate
 
 class PlanStep(BaseModel):
     """A single step in the execution plan."""
-    action: Literal[
-        "retrieve", "add", "subtract", "multiply", "divide", "return_percentage"
-    ] = Field(description="The action to perform in this step.")
+    action: Literal["retrieve", "compute"] = Field(
+        description=(
+            "The action to perform. 'retrieve' fetches a value. "
+            "'compute' runs arbitrary Python code in a secure sandbox."
+        )
+    )
     args: list[str] = Field(
         description=(
-            "Arguments for the action. For 'retrieve', use ['FieldName', 'Year']. "
-            "For calculations, use ['stepX', 'stepY'] or literal numbers."
+            "For 'retrieve': ['FieldName', 'Year']. "
+            "For 'compute': a natural-language description of the calculation."
         )
     )
 
@@ -116,53 +119,26 @@ def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str) -> str:
     return retrieve(ctx, field, year)
 
 
-def add_tool(ctx: RunContext[PipelineDeps], a: float, b: float) -> float:
-    """Add two numbers together."""
-    return a + b
-
-
-def multiply_tool(ctx: RunContext[PipelineDeps], a: float, b: float) -> float:
-    """Multiply two numbers."""
-    return a * b
-
-
-def subtract_tool(ctx: RunContext[PipelineDeps], a: float, b: float) -> float:
-    """Subtract the second number from the first."""
-    return a - b
-
-
-def divide_tool(ctx: RunContext[PipelineDeps], a: float, b: float) -> str:
-    """Divide the first number by the second. Returns error string on division by zero."""
-    if b == 0 or b is None:
-        return "ERROR: Division by zero"
-    return str(a / b)
-
-
-def return_percentage_tool(ctx: RunContext[PipelineDeps], a: float, b: float) -> str:
-    """Calculate (a / b) * 100. Returns error string on division by zero."""
-    if b == 0 or b is None:
-        return "ERROR: Division by zero"
-    return str((a / b) * 100)
-
-
 def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
     """
     Execute Python code in a secure sandbox using pydantic-monty.
-    
-    This tool allows the agent to perform mathematical operations or custom calculations
-    that are not covered by the basic toolkit. The sandbox provides a secure environment
-    for executing Python code written by the LLM.
-    
-    The code should use a `return` statement to return the result.
-    
-    Example usage:
-        code = "return 10 + 20"
-        code = "return (100 * 1.05) ** 3"
-    
+
+    Use this tool for ALL calculations after retrieving the needed values.
+    The code should define variables for any retrieved values, then use a
+    `return` statement to return the final result.
+
+    Example:
+        code = '''
+        revenue_2022 = 1500000
+        expenses_2022 = 800000
+        margin = (revenue_2022 - expenses_2022) / revenue_2022 * 100
+        return margin
+        '''
+
     Available in the sandbox:
     - Basic Python syntax and operators
-    - Common math functions (via monty's built-in math module)
-    - Computed values from previous steps (via context)
+    - math module (math.sqrt, math.pow, etc.)
+    - Common builtins (abs, round, min, max, sum, len, sorted)
     """
     import asyncio
     import io
@@ -286,22 +262,28 @@ def build_planner_agent(df: pd.DataFrame) -> Agent[None, QueryPlan]:
 
     instructions = f"""You are a financial data analysis planner.
 
-Available fields: {', '.join(fields)}
-Available years: {', '.join(years)}
+    Available fields: {', '.join(fields)}
+    Available years: {', '.join(years)}
 
-Task types:
-- retrieve_numbers: Simple lookups (e.g., "What was revenue in 2022?")
-- perform_calculations: Math operations (e.g., "What's the profit margin?")
-- give_advice: Recommendations or analysis
-- other: Everything else
+    Task types:
+    - retrieve_numbers: Simple lookups (e.g., "What was revenue in 2022?")
+    - perform_calculations: Any math or comparison (e.g., "What's the profit margin?", "Compare YoY growth")
+    - give_advice: Recommendations or analysis
+    - other: Everything else
 
-For retrieve_numbers: return items like ["Revenue, 2022"]
-For perform_calculations: return a plan with numbered steps:
-  - retrieve ["FieldName", "Year"]
-  - add / subtract / multiply / divide / return_percentage ["stepX", "stepY"]
-  
-Always use exact field names and years from the available lists.
-"""
+    For retrieve_numbers: return items like ["Revenue, 2022"]
+    For perform_calculations: return a plan with:
+    - retrieve steps to get each needed value: ["FieldName", "Year"]
+    - one compute step with a natural-language description of the full calculation
+
+    Example:
+    step1: retrieve ["Revenue", "2022"]
+    step2: retrieve ["Revenue", "2021"]
+    step3: retrieve ["Expenses", "2022"]
+    step4: compute ["Calculate (Revenue 2022 - Expenses 2022) / Revenue 2022 * 100"]
+
+    Always use exact field names and years from the available lists.
+    """
 
     return Agent(
         model,
@@ -320,15 +302,17 @@ def build_executor_agent(df: pd.DataFrame) -> Agent[PipelineDeps, ExecutionResul
 
     system_prompt = """You are a financial data execution engine.
 
-You have tools to retrieve values from a DataFrame and perform arithmetic.
-Execute the user's query step by step:
-1. Call retrieve/extract_val to get needed values
-2. Call arithmetic tools (add, subtract, multiply, divide, return_percentage) to compute results
-3. For complex calculations not covered by basic tools, use execute_python_code to run Python code in a secure sandbox
-4. Return the final answer as structured data
+    You have two tools:
+    1. retrieve / extract_val — fetch numeric values from the financial DataFrame
+    2. execute_python_code — run Python code in a secure sandbox to perform ANY calculation
 
-If a step fails, note it and continue with what you can.
-"""
+    Execution flow:
+    1. Call retrieve to get all needed values
+    2. Call execute_python_code with Python code that performs the full calculation using those values
+    3. Return the final answer as structured data
+
+    If a retrieval fails, note it and continue with what you can.
+    """
 
     return Agent(
         model,
@@ -338,11 +322,6 @@ If a step fails, note it and continue with what you can.
         tools=[
             retrieve_t,
             extract_t,
-            add_tool,
-            multiply_tool,
-            subtract_tool,
-            divide_tool,
-            return_percentage_tool,
             execute_python_code,
         ],
         model_settings={"temperature": 0.1},
@@ -358,11 +337,11 @@ def build_responder_agent() -> Agent[None, str]:
         result_type=str,
         system_prompt="""You are a helpful financial assistant.
 
-Given a user's question and the calculated results, provide a clear, conversational
-response that directly answers the question. Include specific numerical values
-with proper formatting (currency, percentages). Briefly explain how the answer
-was derived. Use a friendly, professional tone.
-""",
+        Given a user's question and the calculated results, provide a clear, conversational
+        response that directly answers the question. Include specific numerical values
+        with proper formatting (currency, percentages). Briefly explain how the answer
+        was derived. Use a friendly, professional tone.
+        """,
         model_settings={"temperature": 0.3},
     )
 
@@ -406,12 +385,17 @@ def build_query_pipeline(
                 f"Retrieve the following values and return them as the final answer: {plan.items}"
             )
         elif plan.plan:
-            steps_desc = "\n".join(
-                f"{name}: {step.action}({step.args})"
-                for name, step in plan.plan.items()
-            )
+            retrieve_steps = []
+            compute_desc = ""
+            for name, step in plan.plan.items():
+                if step.action == "retrieve":
+                    retrieve_steps.append(f"  {name}: retrieve({step.args})")
+                elif step.action == "compute":
+                    compute_desc = step.args[0] if step.args else ""
+            steps_desc = "\n".join(retrieve_steps)
             exec_prompt = (
-                f"Execute this plan step by step:\n{steps_desc}\n\n"
+                f"Retrieve these values:\n{steps_desc}\n\n"
+                f"Then use execute_python_code to calculate: {compute_desc}\n\n"
                 f"User query: {query}"
             )
         else:

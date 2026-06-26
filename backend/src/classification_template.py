@@ -4,9 +4,8 @@ class ClassTemplates:
     CLASSIFIER_PROMPT = """
         Analyze the user's financial query and generate a JSON response with the appropriate task type and action plan.
 
-        ### Available Data:
-        - Fields: {available_fields}
-        - Years: {available_years}
+        ### Available Data (Multi-Sheet):
+        {sheet_context}
 
         ### Task Types:
         1. "retrieve_numbers": When the query asks for specific numeric values
@@ -16,27 +15,49 @@ class ClassTemplates:
 
         ### Response Structure Rules:
         1. For "retrieve_numbers":
-        - Include an "items" list with format: ["FieldName, Year"]
-        - Always use exact field names from available_fields
-        - Always use years from available_years
+        - Include an "items" list with format: ["FieldName, Year"] or ["SheetName, FieldName, Year"] for sheet-specific retrieval
+        - Always use exact field names from the sheet context
+        - Always use years from the sheet context
 
         2. For "perform_calculations":
         - Create a "plan" object with numbered steps
         - Each step must be one of:
-            * retrieve ["FieldName, Year"]
-            * add ["stepX", "stepY"]
-            * subtract ["stepX", "stepY"] 
-            * multiply ["stepX", "stepY"]
-            * divide ["stepX", "stepY"]
-            * return_percentage ["stepX", "stepY"]
+            * retrieve ["FieldName, Year"] — search all sheets
+            * retrieve ["SheetName, FieldName, Year"] — search specific sheet
+            * add ["stepX", "stepY", ...] — sum of N values
+            * subtract ["stepX", "stepY"] — difference of two values
+            * multiply ["stepX", "stepY", ...] — product of N values
+            * divide ["stepX", "stepY"] — quotient of two values
+            * return_percentage ["stepX", "stepY"] — (stepX / stepY) * 100
+            * sqrt ["stepX"] — square root
+            * power ["stepX", "stepY"] — stepX raised to stepY
+            * log ["stepX", "stepY"] — log base stepY of stepX
+            * exp ["stepX"] — e raised to stepX
+            * abs ["stepX"] — absolute value
+            * negate ["stepX"] — negation
+            * max ["stepX", "stepY", ...] — maximum of N values
+            * min ["stepX", "stepY", ...] — minimum of N values
+            * average ["stepX", "stepY", ...] — mean of N values
+            * median ["stepX", "stepY", ...] — median of N values
+            * stdev ["stepX", "stepY", ...] — standard deviation of N values
+            * yoy_growth ["stepX", "stepY"] — year-over-year growth rate (%)
+            * cagr ["stepX", "stepY", "stepZ"] — CAGR: [end_value, start_value, num_years]
+            * ratio ["stepX", "stepY"] — simple ratio
+            * percentage_change ["stepX", "stepY"] — percentage change from old to new
+            * difference ["stepX", "stepY"] — absolute difference
+            * compute ["natural language description"] — for complex calculations
 
         3. For "give_advice":
         - Provide a "description" of the advice needed
 
         ### Special Handling:
-        - These terms ALWAYS indicate calculations: sum, total, net, ratio, percentage, per, rate, cumulative, combined, difference, overall, growth, change
+        - These terms ALWAYS indicate calculations: sum, total, net, ratio, percentage, per, rate, cumulative, combined, difference, overall, growth, change, average, mean, median, standard deviation, CAGR, compound, square root, power, exponent, log, minimum, maximum
         - Always validate field names and years against available data
         - For ambiguous requests, default to retrieval
+        - Prefer named operations over compute for simple math
+        - Use compute only for complex multi-step formulas that can't be expressed with named operations
+        - When a query references data from multiple sheets, use sheet-specific retrieval with ["SheetName", "FieldName", "Year"]
+        - Sheets in the same schema group have consistent columns and can be compared directly
 
         ### Examples:
 
@@ -72,18 +93,74 @@ class ClassTemplates:
         ]
         }}
 
-        [Example 4: Complex Calculation]
+        [Example 4: Ratio Calculation]
         Query: "What's the ratio of R&D to Marketing in 2022?"
         {{
         "task_type": "perform_calculations",
         "plan": {{
             "step1": {{"action": "retrieve", "args": ["R&D Expense", "2022"]}},
             "step2": {{"action": "retrieve", "args": ["Marketing Expense", "2022"]}},
-            "step3": {{"action": "divide", "args": ["step1", "step2"]}}
+            "step3": {{"action": "ratio", "args": ["step1", "step2"]}}
         }}
         }}
 
-        [Example 5: Advice Request]
+        [Example 5: YoY Growth]
+        Query: "What's the year-over-year growth of Revenue from 2022 to 2023?"
+        {{
+        "task_type": "perform_calculations",
+        "plan": {{
+            "step1": {{"action": "retrieve", "args": ["Revenue", "2023"]}},
+            "step2": {{"action": "retrieve", "args": ["Revenue", "2022"]}},
+            "step3": {{"action": "yoy_growth", "args": ["step1", "step2"]}}
+        }}
+        }}
+
+        [Example 6: CAGR]
+        Query: "What's the CAGR of Expenses from 2018 to 2023?"
+        {{
+        "task_type": "perform_calculations",
+        "plan": {{
+            "step1": {{"action": "retrieve", "args": ["Expense", "2023"]}},
+            "step2": {{"action": "retrieve", "args": ["Expense", "2018"]}},
+            "step3": {{"action": "cagr", "args": ["step1", "step2", "5"]}}
+        }}
+        }}
+
+        [Example 7: Average of Multiple Fields]
+        Query: "What's the average of Wages, Social Contributions, and Use of Goods in 2022?"
+        {{
+        "task_type": "perform_calculations",
+        "plan": {{
+            "step1": {{"action": "retrieve", "args": ["Wages and salaries", "2022"]}},
+            "step2": {{"action": "retrieve", "args": ["Employers' social contributions", "2022"]}},
+            "step3": {{"action": "retrieve", "args": ["Use of goods and services", "2022"]}},
+            "step4": {{"action": "average", "args": ["step1", "step2", "step3"]}}
+        }}
+        }}
+
+        [Example 8: Complex Calculation via Compute]
+        Query: "What's the square root of the sum of all expenses in 2023 divided by revenue?"
+        {{
+        "task_type": "perform_calculations",
+        "plan": {{
+            "step1": {{"action": "retrieve", "args": ["Expense", "2023"]}},
+            "step2": {{"action": "retrieve", "args": ["Revenue", "2023"]}},
+            "step3": {{"action": "compute", "args": ["Calculate math.sqrt(step1 / step2)"]}}
+        }}
+        }}
+
+        [Example 9: Cross-Sheet Comparison]
+        Query: "Compare the Revenue of 2022 between Sheet1 and Sheet2"
+        {{
+        "task_type": "perform_calculations",
+        "plan": {{
+            "step1": {{"action": "retrieve", "args": ["Sheet1", "Revenue", "2022"]}},
+            "step2": {{"action": "retrieve", "args": ["Sheet2", "Revenue", "2022"]}},
+            "step3": {{"action": "subtract", "args": ["step1", "step2"]}}
+        }}
+        }}
+
+        [Example 10: Advice Request]
         Query: "How can we reduce operational costs?"
         {{
         "task_type": "give_advice",

@@ -2,6 +2,7 @@
 Test the actual LLM agent generating Python code for vague prompts.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -39,8 +40,12 @@ def test_real_agent_code_generation():
     print(f"\nShape: {df.shape}")
     print()
     
-    # Build the pipeline
-    pipeline = build_query_pipeline(None, df, None)
+    # Build the pipeline with correct signature
+    sheets = {"Sheet1": df}
+    sheet_metas = []
+    from llama_index.core.prompts import PromptTemplate
+    template = PromptTemplate("Query: {query}\n\nSheet context: {sheet_context}")
+    pipeline = build_query_pipeline(None, sheets, sheet_metas, template)
     
     # Test 1: Vague prompt for CAGR calculation
     print("Test 1: Vague prompt for CAGR calculation")
@@ -49,7 +54,7 @@ def test_real_agent_code_generation():
     print(f"Prompt: {prompt1}\n")
     
     try:
-        result1 = pipeline(prompt1)
+        result1 = asyncio.run(pipeline(prompt1))
         print(f"Result: {result1}")
         print()
     except Exception as e:
@@ -65,7 +70,7 @@ def test_real_agent_code_generation():
     print(f"Prompt: {prompt2}\n")
     
     try:
-        result2 = pipeline(prompt2)
+        result2 = asyncio.run(pipeline(prompt2))
         print(f"Result: {result2}")
         print()
     except Exception as e:
@@ -81,7 +86,7 @@ def test_real_agent_code_generation():
     print(f"Prompt: {prompt3}\n")
     
     try:
-        result3 = pipeline(prompt3)
+        result3 = asyncio.run(pipeline(prompt3))
         print(f"Result: {result3}")
         print()
     except Exception as e:
@@ -97,7 +102,7 @@ def test_real_agent_code_generation():
     print(f"Prompt: {prompt4}\n")
     
     try:
-        result4 = pipeline(prompt4)
+        result4 = asyncio.run(pipeline(prompt4))
         print(f"Result: {result4}")
         print()
     except Exception as e:

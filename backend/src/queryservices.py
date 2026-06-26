@@ -1,8 +1,8 @@
 from langchain_text_splitters.character import RecursiveCharacterTextSplitter
 from excelservices import ExcelService
 import numpy as np
-import chromadb
-from chroma_client import get_db_client
+# import chromadb
+# from chroma_client import get_db_client
 from dotenv import load_dotenv
 import os
 from openai import OpenAI
@@ -24,31 +24,12 @@ class QueryService:
 
     @classmethod
     def getTopKDocuments(self, query, k):
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap = 50,
-            length_function = len,
-            is_separator_regex = False
-        )
-        documents = text_splitter.create_documents([query])
-        subqueries = [doc.page_content for doc in documents]
-        subquery_embeddings = ExcelService.batch_embed(subqueries)
-        # chromadb.api.client.SharedSystemClient.clear_system_cache()
-        chroma_client = get_db_client()
-        collection = chroma_client.get_collection(name = "finance_docs")
-        all_documents = collection.get(include = ["embeddings", "documents"])
-        embeddings = all_documents['embeddings']
-
-        similarities = []
-        for chunk_embedding in embeddings:
-            subquery_scores = [self.cosineSimilarity(subquery_embedding, chunk_embedding) for subquery_embedding in subquery_embeddings]
-            similarities.append(np.mean(subquery_scores))
-
-        similarities = np.array(similarities)
-        top_indices = similarities[::-1].argsort()[:k]
-        documents = all_documents['documents']
-        relevant_documents = [documents[i] for i in top_indices]
-        return relevant_documents        
+        # ChromaDB disabled — vector search no longer used.
+        # The Pydantic AI pipeline (pipeline.py) handles retrieval directly via DataFrames.
+        raise NotImplementedError(
+            "getTopKDocuments is disabled (ChromaDB removed). "
+            "Use the Pydantic AI pipeline in pipeline.py instead."
+        )        
 
     
     @classmethod

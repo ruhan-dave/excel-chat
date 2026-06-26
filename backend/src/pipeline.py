@@ -1,18 +1,125 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from statistics import mean, median, stdev
+from typing import Any, Callable, Literal
 
 import pandas as pd
 import pydantic_monty
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.tools import ToolDefinition
 
 from llama_index.core.prompts import PromptTemplate
+
+from sheet_metadata import SheetMeta
+
+
+# ============================================================================
+# Named Math Operations
+# ============================================================================
+
+def op_add(*args: float) -> float:
+    return sum(args)
+
+def op_subtract(a: float, b: float) -> float:
+    return a - b
+
+def op_multiply(*args: float) -> float:
+    result = 1.0
+    for a in args:
+        result *= a
+    return result
+
+def op_divide(a: float, b: float) -> float | None:
+    return a / b if b != 0 else None
+
+def op_percentage(a: float, b: float) -> float | None:
+    return (a / b) * 100 if b != 0 else None
+
+def op_sqrt(a: float) -> float:
+    return math.sqrt(a)
+
+def op_power(a: float, b: float) -> float:
+    return math.pow(a, b)
+
+def op_log(a: float, base: float = math.e) -> float | None:
+    return math.log(a, base) if a > 0 else None
+
+def op_exp(a: float) -> float:
+    return math.exp(a)
+
+def op_abs(a: float) -> float:
+    return abs(a)
+
+def op_negate(a: float) -> float:
+    return -a
+
+def op_max(*args: float) -> float:
+    return max(args)
+
+def op_min(*args: float) -> float:
+    return min(args)
+
+def op_average(*args: float) -> float | None:
+    return mean(args) if args else None
+
+def op_median(*args: float) -> float | None:
+    return median(args) if args else None
+
+def op_yoy_growth(current: float, previous: float) -> float | None:
+    return ((current - previous) / previous) * 100 if previous != 0 else None
+
+def op_cagr(end_value: float, start_value: float, num_years: float) -> float | None:
+    if start_value <= 0 or num_years <= 0:
+        return None
+    return ((end_value / start_value) ** (1 / num_years) - 1) * 100
+
+def op_ratio(a: float, b: float) -> float | None:
+    return a / b if b != 0 else None
+
+def op_percentage_change(new: float, old: float) -> float | None:
+    return ((new - old) / old) * 100 if old != 0 else None
+
+def op_difference(a: float, b: float) -> float:
+    return abs(a - b)
+
+def op_stdev(*args: float) -> float | None:
+    return stdev(args) if len(args) >= 2 else None
+
+NAMED_OPERATIONS: dict[str, Callable[..., Any]] = {
+    "add": op_add,
+    "subtract": op_subtract,
+    "multiply": op_multiply,
+    "divide": op_divide,
+    "return_percentage": op_percentage,
+    "sqrt": op_sqrt,
+    "power": op_power,
+    "log": op_log,
+    "exp": op_exp,
+    "abs": op_abs,
+    "negate": op_negate,
+    "max": op_max,
+    "min": op_min,
+    "average": op_average,
+    "median": op_median,
+    "yoy_growth": op_yoy_growth,
+    "cagr": op_cagr,
+    "ratio": op_ratio,
+    "percentage_change": op_percentage_change,
+    "difference": op_difference,
+    "stdev": op_stdev,
+}
+
+UNARY_OPERATIONS = {"sqrt", "abs", "negate", "exp"}
+BINARY_OPERATIONS = {"subtract", "divide", "return_percentage", "power", "log",
+                     "yoy_growth", "ratio", "percentage_change", "difference"}
+TERNARY_OPERATIONS = {"cagr"}
+N_ARY_OPERATIONS = {"add", "multiply", "max", "min", "average", "median", "stdev"}
 
 
 # ============================================================================
@@ -21,16 +128,34 @@ from llama_index.core.prompts import PromptTemplate
 
 class PlanStep(BaseModel):
     """A single step in the execution plan."""
-    action: Literal["retrieve", "compute"] = Field(
+    action: Literal[
+        "retrieve", "compute",
+        "add", "subtract", "multiply", "divide", "return_percentage",
+        "sqrt", "power", "log", "exp", "abs", "negate",
+        "max", "min", "average", "median", "stdev",
+        "yoy_growth", "cagr", "ratio", "percentage_change", "difference",
+    ] = Field(
         description=(
-            "The action to perform. 'retrieve' fetches a value. "
-            "'compute' runs arbitrary Python code in a secure sandbox."
+            "The action to perform. "
+            "'retrieve' fetches a value from the DataFrame. "
+            "'compute' runs arbitrary Python code in a secure sandbox for complex calculations. "
+            "Named operations (add, subtract, multiply, divide, return_percentage, sqrt, power, "
+            "log, exp, abs, negate, max, min, average, median, stdev, yoy_growth, cagr, ratio, "
+            "percentage_change, difference) apply the corresponding math function to prior step results."
         )
     )
     args: list[str] = Field(
         description=(
-            "For 'retrieve': ['FieldName', 'Year']. "
-            "For 'compute': a natural-language description of the calculation."
+            "For 'retrieve': ['FieldName', 'Year'] to search all sheets, "
+            "or ['SheetName', 'FieldName', 'Year'] to search a specific sheet. "
+            "For 'compute': a natural-language description of the calculation. "
+            "For named operations: references to prior steps (e.g. ['step1', 'step2']) "
+            "or literal numbers (e.g. ['step1', '100']). "
+            "Unary ops (sqrt, abs, negate, exp): one arg. "
+            "Binary ops (subtract, divide, return_percentage, power, log, yoy_growth, ratio, "
+            "percentage_change, difference): two args. "
+            "Ternary ops (cagr): three args [end_value, start_value, num_years]. "
+            "N-ary ops (add, multiply, max, min, average, median, stdev): two or more args."
         )
     )
 
@@ -52,6 +177,18 @@ class QueryPlan(BaseModel):
         default=None,
         description="Description of advice needed for 'give_advice' tasks.",
     )
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def _parse_items(cls, v):
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return v
 
 
 class ExecutionResult(BaseModel):
@@ -81,11 +218,20 @@ class FriendlyResponse(BaseModel):
 @dataclass
 class PipelineDeps:
     """Dependencies passed through RunContext to tools and agents."""
-    df: pd.DataFrame
+    sheets: dict[str, pd.DataFrame]
+    sheet_metas: list[SheetMeta]
     original_query: str
     computed_values: dict[str, Any] = field(default_factory=dict)
     available_fields: list[str] = field(default_factory=list)
     available_years: list[str] = field(default_factory=list)
+    user_id: str = "anonymous"
+
+    @property
+    def df(self) -> pd.DataFrame:
+        """Backward-compatible single-df access: returns the first sheet's df."""
+        if self.sheets:
+            return next(iter(self.sheets.values()))
+        return pd.DataFrame()
 
 
 # ============================================================================
@@ -105,21 +251,64 @@ def build_openrouter_model() -> OpenAIModel:
 # Tools
 # ============================================================================
 
-def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str) -> str:
-    """Retrieve a numeric value from the financial DataFrame."""
-    df = ctx.deps.df
-    if field in df.index and year in df.columns:
-        val = df.loc[field, year]
-        return str(float(val))
-    return f"ERROR: '{field}' or '{year}' not found in data."
+def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
+    """Retrieve a numeric value from the financial DataFrame(s).
+
+    If a sheet name is provided, search only that sheet.
+    If no sheet name is provided, search across all sheets and return
+    all matching values (useful for cross-sheet comparisons in consistent-schema groups).
+    """
+    # Layer 1: Check result cache before scanning DataFrame
+    try:
+        from result_cache import build_retrieve_key, result_cache_get, result_cache_set
+        cache_key = build_retrieve_key(field, year, sheet)
+        cached = result_cache_get(ctx.deps.user_id, cache_key)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass  # cache unavailable — proceed with DataFrame scan
+
+    sheets = ctx.deps.sheets
+    if not sheets:
+        return "ERROR: No sheets available."
+
+    if sheet and sheet in sheets:
+        df = sheets[sheet]
+        if field in df.index and year in df.columns:
+            val = df.loc[field, year]
+            result = str(float(val))
+        else:
+            return f"ERROR: '{field}' or '{year}' not found in sheet '{sheet}'."
+    else:
+        # Search across all sheets
+        results = []
+        for sheet_name, df in sheets.items():
+            if field in df.index and year in df.columns:
+                val = df.loc[field, year]
+                results.append(f"{sheet_name}: {float(val)}")
+
+        if results:
+            result = "; ".join(results)
+        else:
+            return f"ERROR: '{field}' or '{year}' not found in any sheet."
+
+    # Layer 1: Store result in cache (skip error returns)
+    try:
+        from result_cache import build_retrieve_key, result_cache_set
+        cache_key = build_retrieve_key(field, year, sheet)
+        result_cache_set(ctx.deps.user_id, cache_key, result, cache_type="retrieve")
+    except Exception:
+        pass
+
+    return result
 
 
-def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str) -> str:
-    """Extract a single value from the DataFrame by field and year."""
-    return retrieve(ctx, field, year)
+def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
+    """Extract a single value from the DataFrame by field and year (optionally from a specific sheet)."""
+    return retrieve(ctx, field, year, sheet)
 
 
-def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
+async def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
     """
     Execute Python code in a secure sandbox using pydantic-monty.
 
@@ -140,11 +329,26 @@ def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
     - math module (math.sqrt, math.pow, etc.)
     - Common builtins (abs, round, min, max, sum, len, sorted)
     """
-    import asyncio
     import io
     import sys
-    
+
+    # Layer 2: Check sandbox cache before executing
     try:
+        from result_cache import sandbox_cache_get, sandbox_cache_set
+        cached = sandbox_cache_get(ctx.deps.user_id, code)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
+    try:
+        # Dedent multi-line code — LLM often generates indented blocks
+        # (e.g. inside a triple-quoted string) which pydantic-monty rejects
+        # with "Unexpected indentation". textwrap.dedent removes the common
+        # leading whitespace from all lines.
+        import textwrap
+        code = textwrap.dedent(code).strip()
+
         # Modify code to ensure it has a return statement if it doesn't
         # If code assigns to 'result' or 'result_', add a return statement
         code_stripped = code.strip()
@@ -197,25 +401,31 @@ from typing import Any
         try:
             sys.stdout = stdout_capture
             
-            # Run the code asynchronously
-            async def run_monty():
-                return await m.run_async(
-                    inputs={},
-                    external_functions=external_functions,
-                )
-            
-            output = asyncio.run(run_monty())
+            # Run the code directly in the async context
+            output = await m.run_async(
+                inputs={},
+                external_functions=external_functions,
+            )
             
             # Get captured stdout
             stdout_output = stdout_capture.getvalue()
             
             # Return output from return statement or stdout
             if output is not None:
-                return str(output)
+                result = str(output)
             elif stdout_output:
-                return stdout_output.strip()
+                result = stdout_output.strip()
             else:
-                return "Code executed successfully (no output)"
+                result = "Code executed successfully (no output)"
+
+            # Layer 2: Store successful sandbox result in cache
+            try:
+                from result_cache import sandbox_cache_set
+                sandbox_cache_set(ctx.deps.user_id, code, result)
+            except Exception:
+                pass
+
+            return result
                 
         finally:
             sys.stdout = old_stdout
@@ -231,22 +441,28 @@ from typing import Any
 async def _prepare_retrieve_tool(
     ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """Inject available fields/years into the retrieve tool schema."""
+    """Inject available fields/years/sheets into the retrieve tool schema."""
     fields = ctx.deps.available_fields
     years = ctx.deps.available_years
+    sheet_names = list(ctx.deps.sheets.keys())
     tool_def.parameters_json_schema["properties"]["field"]["description"] = (
         f"Field name from available fields: {', '.join(fields)}"
     )
     tool_def.parameters_json_schema["properties"]["year"]["description"] = (
         f"Year from available years: {', '.join(years)}"
     )
+    if "sheet" in tool_def.parameters_json_schema.get("properties", {}):
+        tool_def.parameters_json_schema["properties"]["sheet"]["description"] = (
+            f"Sheet name (optional). Available sheets: {', '.join(sheet_names)}. "
+            f"If omitted, searches all sheets."
+        )
     return tool_def
 
 
 async def _prepare_extract_val_tool(
     ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """Inject available fields/years into the extract_val tool schema."""
+    """Inject available fields/years/sheets into the extract_val tool schema."""
     return await _prepare_retrieve_tool(ctx, tool_def)
 
 
@@ -254,16 +470,46 @@ async def _prepare_extract_val_tool(
 # Agent Builders
 # ============================================================================
 
-def build_planner_agent(df: pd.DataFrame) -> Agent[None, QueryPlan]:
+def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[SheetMeta]) -> Agent[None, QueryPlan]:
     """Agent that generates a structured QueryPlan from a user question."""
     model = build_openrouter_model()
-    fields = [str(f) for f in df.index]
-    years = [str(y) for y in df.columns]
+
+    # Build multi-sheet context
+    sheet_context_parts = []
+    all_fields = set()
+    all_years = set()
+    for meta in sheet_metas:
+        all_fields.update(meta.fields)
+        all_years.update(meta.years)
+        group_note = f" (schema group: {meta.schema_group})" if meta.schema_group and meta.schema_group != "unique" else ""
+        desc_note = f"\n      Description: {meta.combined_description}" if meta.combined_description != "No description available." else ""
+        sheet_context_parts.append(
+            f"  - Sheet '{meta.sheet_name}' (file: {meta.file_name}){group_note}\n"
+            f"      Fields: {', '.join(meta.fields[:20])}\n"
+            f"      Years: {', '.join(meta.years)}{desc_note}"
+        )
+    sheet_context = "\n".join(sheet_context_parts)
+    fields_str = ", ".join(sorted(all_fields))
+    years_str = ", ".join(sorted(all_years))
+
+    # Identify schema groups for cross-sheet note
+    groups = {}
+    for meta in sheet_metas:
+        if meta.schema_group and meta.schema_group != "unique":
+            groups.setdefault(meta.schema_group, []).append(meta.sheet_name)
+    cross_sheet_note = ""
+    if groups:
+        group_descs = [f"  - {', '.join(sheets_list)}" for sheets_list in groups.values()]
+        cross_sheet_note = f"\n    Cross-sheet calculations are possible for sheets with the same schema group:\n{chr(10).join(group_descs)}\n    When retrieving from a schema group, omit the sheet name to search all sheets in that group."
 
     instructions = f"""You are a financial data analysis planner.
 
-    Available fields: {', '.join(fields)}
-    Available years: {', '.join(years)}
+    Available sheets and their data:
+{sheet_context}
+
+    All available fields across sheets: {fields_str}
+    All available years across sheets: {years_str}
+{cross_sheet_note}
 
     Task types:
     - retrieve_numbers: Simple lookups (e.g., "What was revenue in 2022?")
@@ -271,16 +517,58 @@ def build_planner_agent(df: pd.DataFrame) -> Agent[None, QueryPlan]:
     - give_advice: Recommendations or analysis
     - other: Everything else
 
-    For retrieve_numbers: return items like ["Revenue, 2022"]
-    For perform_calculations: return a plan with:
-    - retrieve steps to get each needed value: ["FieldName", "Year"]
-    - one compute step with a natural-language description of the full calculation
+    For retrieve_numbers: return items like ["Revenue, 2022"] or ["SheetName, Revenue, 2022"] for sheet-specific retrieval.
+    For perform_calculations: return a plan using these step types:
 
-    Example:
-    step1: retrieve ["Revenue", "2022"]
+    1. retrieve — fetch a value: args = ["FieldName", "Year"] (searches all sheets) or ["SheetName", "FieldName", "Year"] (specific sheet)
+    2. Named math operations — apply to prior step results or literal numbers:
+       - Unary (1 arg): sqrt, abs, negate, exp
+       - Binary (2 args): subtract, divide, return_percentage, power, log, yoy_growth, ratio, percentage_change, difference
+       - Ternary (3 args): cagr [end_value, start_value, num_years]
+       - N-ary (2+ args): add, multiply, max, min, average, median, stdev
+       Args can be step references (e.g. "step1") or literal numbers (e.g. "100").
+    3. compute — for complex multi-step calculations that can't be expressed with named ops,
+       provide a natural-language description of the calculation as args[0].
+       The executor will translate this into Python code and run it in a sandbox.
+
+    Prefer named operations for simple math. Use compute for complex formulas,
+    multi-step calculations, or when you need math module functions not covered above.
+
+    When a query involves data from multiple sheets (especially in the same schema group),
+    use retrieve with specific sheet names to get values from each sheet, then apply
+    named operations or compute to combine them.
+
+    Examples:
+
+    [Simple percentage - single sheet]
+    step1: retrieve ["Wages and salaries", "2022"]
+    step2: retrieve ["Expense", "2022"]
+    step3: return_percentage ["step1", "step2"]
+
+    [YoY growth]
+    step1: retrieve ["Revenue", "2023"]
+    step2: retrieve ["Revenue", "2022"]
+    step3: yoy_growth ["step1", "step2"]
+
+    [Cross-sheet comparison - same schema group]
+    step1: retrieve ["Sheet1", "Revenue", "2022"]
+    step2: retrieve ["Sheet2", "Revenue", "2022"]
+    step3: subtract ["step1", "step2"]
+
+    [Cross-sheet average across all sheets]
+    step1: retrieve ["Revenue", "2022"]  (returns values from all matching sheets)
+    step2: compute ["Calculate the average of all Revenue 2022 values retrieved in step1"]
+
+    [CAGR over 5 years]
+    step1: retrieve ["Revenue", "2023"]
+    step2: retrieve ["Revenue", "2018"]
+    step3: cagr ["step1", "step2", "5"]
+
+    [Complex calculation via compute]
+    step1: retrieve ["Revenue", "2023"]
     step2: retrieve ["Revenue", "2021"]
-    step3: retrieve ["Expenses", "2022"]
-    step4: compute ["Calculate (Revenue 2022 - Expenses 2022) / Revenue 2022 * 100"]
+    step3: retrieve ["Expenses", "2023"]
+    step4: compute ["Calculate the compound annual growth rate of Revenue from 2021 to 2023, then multiply by the 2023 profit margin (Revenue - Expenses) / Revenue"]
 
     Always use exact field names and years from the available lists.
     """
@@ -290,26 +578,50 @@ def build_planner_agent(df: pd.DataFrame) -> Agent[None, QueryPlan]:
         result_type=QueryPlan,
         system_prompt=instructions,
         model_settings={"temperature": 0.1},
+        result_retries=3,
     )
 
 
-def build_executor_agent(df: pd.DataFrame) -> Agent[PipelineDeps, ExecutionResult]:
+def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[SheetMeta]) -> Agent[PipelineDeps, ExecutionResult]:
     """Agent that executes a plan using tools, with structured output."""
     model = build_openrouter_model()
 
     retrieve_t = Tool(retrieve, prepare=_prepare_retrieve_tool)
     extract_t = Tool(extract_val, prepare=_prepare_extract_val_tool)
 
-    system_prompt = """You are a financial data execution engine.
+    sheet_names = list(sheets.keys())
+    system_prompt = f"""You are a financial data execution engine.
+
+    You have access to {len(sheets)} sheet(s): {', '.join(sheet_names)}
 
     You have two tools:
-    1. retrieve / extract_val — fetch numeric values from the financial DataFrame
+    1. retrieve / extract_val — fetch numeric values from the financial DataFrame(s)
+       - If a sheet name is provided, searches only that sheet.
+       - If no sheet name is provided, searches all sheets and returns all matching values.
     2. execute_python_code — run Python code in a secure sandbox to perform ANY calculation
 
+    The sandbox supports:
+    - Basic Python syntax and operators (+, -, *, /, **, //, %)
+    - math module (math.sqrt, math.pow, math.log, math.exp, math.ceil, math.floor, etc.)
+    - Common builtins (abs, round, min, max, sum, len, sorted)
+    - statistics module (statistics.mean, statistics.median, statistics.stdev, etc.)
+
     Execution flow:
-    1. Call retrieve to get all needed values
-    2. Call execute_python_code with Python code that performs the full calculation using those values
-    3. Return the final answer as structured data
+    1. Call retrieve to get all needed values from the plan
+    2. For named operations (add, subtract, multiply, divide, return_percentage, sqrt, power,
+       log, exp, abs, negate, max, min, average, median, stdev, yoy_growth, cagr, ratio,
+       percentage_change, difference): either compute directly in Python or use execute_python_code
+    3. For compute steps: call execute_python_code with Python code that performs the full
+       calculation using the retrieved values as literal numbers
+    4. Return the final answer as structured data
+
+    When retrieve returns multiple values (from searching all sheets), parse them carefully.
+    The format is "SheetName: value; SheetName2: value2".
+
+    When writing Python code for execute_python_code:
+    - Use the retrieved numeric values directly as literals in the code
+    - Use a `return` statement to return the final result
+    - Example: code = 'revenue = 1500000\\nexpenses = 800000\\nmargin = (revenue - expenses) / revenue * 100\\nreturn margin'
 
     If a retrieval fails, note it and continue with what you can.
     """
@@ -325,6 +637,7 @@ def build_executor_agent(df: pd.DataFrame) -> Agent[PipelineDeps, ExecutionResul
             execute_python_code,
         ],
         model_settings={"temperature": 0.1},
+        result_retries=3,
     )
 
 
@@ -351,33 +664,39 @@ def build_responder_agent() -> Agent[None, str]:
 # ============================================================================
 
 def build_query_pipeline(
-    llm_client: Any | None, df: pd.DataFrame, classification_template: PromptTemplate
+    llm_client: Any | None,
+    sheets: dict[str, pd.DataFrame],
+    sheet_metas: list[SheetMeta],
+    classification_template: PromptTemplate,
+    user_id: str = "anonymous",
 ) -> Any:
     """
-    Build a Pydantic AI agent pipeline for querying financial data.
+    Build a Pydantic AI agent pipeline for querying financial data across multiple sheets.
 
     Returns a callable that accepts a query string and returns the pipeline result.
     The llm_client argument is kept for backward compatibility but ignored;
     agents create their own OpenRouter model internally.
     """
-    fields = [str(f) for f in df.index]
-    years = [str(y) for y in df.columns]
+    all_fields = sorted(set(f for meta in sheet_metas for f in meta.fields))
+    all_years = sorted(set(y for meta in sheet_metas for y in meta.years))
 
-    def run_pipeline(query: str) -> dict:
+    async def run_pipeline(query: str) -> dict:
         # Step 1: Plan
-        planner = build_planner_agent(df)
-        plan_result = planner.run_sync(query)
+        planner = build_planner_agent(sheets, sheet_metas)
+        plan_result = await planner.run(query)
         plan: QueryPlan = plan_result.data
         print("📋 Plan:", json.dumps(plan.model_dump(), indent=2))
 
         # Step 2: Execute
         deps = PipelineDeps(
-            df=df,
+            sheets=sheets,
+            sheet_metas=sheet_metas,
             original_query=query,
-            available_fields=fields,
-            available_years=years,
+            available_fields=all_fields,
+            available_years=all_years,
+            user_id=user_id,
         )
-        executor = build_executor_agent(df)
+        executor = build_executor_agent(sheets, sheet_metas)
 
         # Build execution prompt from the plan
         if plan.task_type == "retrieve_numbers" and plan.items:
@@ -386,34 +705,49 @@ def build_query_pipeline(
             )
         elif plan.plan:
             retrieve_steps = []
+            named_steps = []
             compute_desc = ""
             for name, step in plan.plan.items():
                 if step.action == "retrieve":
                     retrieve_steps.append(f"  {name}: retrieve({step.args})")
                 elif step.action == "compute":
                     compute_desc = step.args[0] if step.args else ""
+                elif step.action in NAMED_OPERATIONS:
+                    named_steps.append(f"  {name}: {step.action}({step.args})")
             steps_desc = "\n".join(retrieve_steps)
-            exec_prompt = (
-                f"Retrieve these values:\n{steps_desc}\n\n"
-                f"Then use execute_python_code to calculate: {compute_desc}\n\n"
-                f"User query: {query}"
-            )
+            named_desc = "\n".join(named_steps)
+            parts = []
+            if retrieve_steps:
+                parts.append(f"Retrieve these values:\n{steps_desc}")
+            if named_steps:
+                parts.append(f"Apply these named operations:\n{named_desc}")
+            if compute_desc:
+                parts.append(f"Then use execute_python_code to calculate: {compute_desc}")
+            parts.append(f"User query: {query}")
+            exec_prompt = "\n\n".join(parts)
         else:
             exec_prompt = query
 
-        exec_result = executor.run_sync(exec_prompt, deps=deps)
+        exec_result = await executor.run(exec_prompt, deps=deps)
         execution: ExecutionResult = exec_result.data
         print("✅ Execution:", json.dumps(execution.model_dump(), indent=2))
+
+        # Layer 3: Post-execution structured key derivation
+        try:
+            from result_cache import cache_step_results
+            cache_step_results(user_id, plan, execution)
+        except Exception as e:
+            print(f"⚠️ Post-execution caching failed: {e}")
 
         # Step 3: Respond
         responder = build_responder_agent()
         resp_prompt = f"""User's Question: {query}
 
-Execution Results:
-{json.dumps(execution.model_dump(), indent=2)}
+        Execution Results:
+        {json.dumps(execution.model_dump(), indent=2)}
 
-Provide a clear, natural language response."""
-        resp_result = responder.run_sync(resp_prompt)
+        Provide a clear, natural language response."""
+        resp_result = await responder.run(resp_prompt)
         friendly: str = resp_result.data
         print(f"📝 Response: {friendly[:100]}...")
 
@@ -425,7 +759,7 @@ Provide a clear, natural language response."""
     return run_pipeline
 
 
-def generate_user_friendly_response(
+async def generate_user_friendly_response(
     llm_client: Any | None, original_query: str, json_result: Any
 ) -> str:
     """
@@ -435,11 +769,11 @@ def generate_user_friendly_response(
     responder = build_responder_agent()
     prompt = f"""User's Question: {original_query}
 
-Calculated Results:
-{json.dumps(json_result, indent=2)}
+    Calculated Results:
+    {json.dumps(json_result, indent=2)}
 
-Provide a clear, natural language response."""
-    result = responder.run_sync(prompt)
+    Provide a clear, natural language response."""
+    result = await responder.run(prompt)
     return result.data
 
 
@@ -503,32 +837,22 @@ def executing_plan_from_json(df: pd.DataFrame, json_str: str) -> dict[str, Any]:
                     else:
                         context[step_name] = None
 
-                elif action in ("add", "subtract", "multiply", "divide", "return_percentage"):
-                    if len(args) == 2:
-                        arg1, arg2 = args
-                        val1 = _resolve_arg(arg1, computed_values)
-                        val2 = _resolve_arg(arg2, computed_values)
-
-                        if val1 is not None and val2 is not None:
-                            if action == "add":
-                                context[step_name] = val1 + val2
-                            elif action == "subtract":
-                                context[step_name] = val1 - val2
-                            elif action == "multiply":
-                                context[step_name] = val1 * val2
-                            elif action == "divide":
-                                context[step_name] = (
-                                    val1 / val2 if val2 != 0 else None
-                                )
-                            elif action == "return_percentage":
-                                context[step_name] = (
-                                    (val1 / val2) * 100 if val2 != 0 else None
-                                )
-                            computed_values[step_name] = context[step_name]
-                        else:
+                elif action in NAMED_OPERATIONS:
+                    func = NAMED_OPERATIONS[action]
+                    resolved_vals = []
+                    for arg in args:
+                        val = _resolve_arg(arg, computed_values)
+                        if val is None:
                             context[step_name] = None
+                            break
+                        resolved_vals.append(val)
                     else:
-                        context[step_name] = None
+                        try:
+                            context[step_name] = func(*resolved_vals)
+                            computed_values[step_name] = context[step_name]
+                        except Exception as e:
+                            print(f"⚠️ Error in {action}: {e}")
+                            context[step_name] = None
                 else:
                     context[step_name] = None
                 continue

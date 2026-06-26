@@ -6,6 +6,7 @@ This test simulates what code the agent might generate for various
 vague financial queries and executes it through the sandbox.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -17,10 +18,16 @@ sys.path.insert(0, str(backend_src))
 from pipeline import PipelineDeps, execute_python_code
 
 
+def _run(ctx, code):
+    """Helper to run async execute_python_code in sync tests."""
+    return asyncio.run(execute_python_code(ctx, code))
+
+
 def create_mock_context(computed_values=None):
     """Create a mock RunContext for testing."""
     deps = PipelineDeps(
-        df=None,
+        sheets={},
+        sheet_metas=[],
         original_query="test",
         computed_values=computed_values or {},
         available_fields=[],
@@ -63,7 +70,7 @@ cagr = ((end_value / start_value) ** (1 / years) - 1) * 100
 return cagr
 """
     print(f"Generated code:\n{code1}")
-    result1 = execute_python_code(ctx, code1)
+    result1 = _run(ctx,code1)
     print(f"Result: {result1}")
     print(f"Expected: ~22.47%")
     assert "22" in str(result1), f"Expected ~22%, got {result1}"
@@ -81,7 +88,7 @@ avg_margin = sum(margins) / len(margins)
 return avg_margin
 """
     print(f"Generated code:\n{code2}")
-    result2 = execute_python_code(ctx, code2)
+    result2 = _run(ctx,code2)
     print(f"Result: {result2}")
     print(f"Expected: ~51.11% (50%, 50%, 53.33% averaged)")
     assert "51" in str(result2), f"Expected ~51%, got {result2}"
@@ -98,7 +105,7 @@ improvement = ratio_2022 > ratio_2020
 return improvement
 """
     print(f"Generated code:\n{code3}")
-    result3 = execute_python_code(ctx, code3)
+    result3 = _run(ctx,code3)
     print(f"Result: {result3}")
     print(f"Expected: True (2.0 > 2.14 is False, but ratio improved)")
     print("✅ Ratio comparison passed\n")
@@ -115,7 +122,7 @@ avg_growth = sum(growth_rates) / len(growth_rates)
 return avg_growth
 """
     print(f"Generated code:\n{code4}")
-    result4 = execute_python_code(ctx, code4)
+    result4 = _run(ctx,code4)
     print(f"Result: {result4}")
     print(f"Expected: ~22.5% average growth (20% + 25% / 2)")
     assert "22" in str(result4), f"Expected ~22%, got {result4}"
@@ -131,7 +138,7 @@ sorted_data = sorted(data, key=lambda x: x[1], reverse=True)
 return sorted_data[0]
 """
     print(f"Generated code:\n{code5}")
-    result5 = execute_python_code(ctx, code5)
+    result5 = _run(ctx,code5)
     print(f"Result: {result5}")
     print(f"Expected: Year with highest margin (2022: 53.33%)")
     assert "2022" in str(result5) or "53" in str(result5), f"Expected 2022 or 53%, got {result5}"

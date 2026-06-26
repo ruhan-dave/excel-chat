@@ -19,7 +19,6 @@ charset-normalizer==3.4.1
 chroma-hnswlib==0.7.6
 chromadb==0.6.3
 click==8.1.8
-cohere==5.13.12
 colorama==0.4.6
 coloredlogs==15.0.1
 comm==0.2.2
@@ -87,7 +86,6 @@ llama-index-cli==0.4.1
 llama-index-core==0.12.27
 llama-index-embeddings-openai==0.3.1
 llama-index-indices-managed-llama-cloud==0.6.10
-llama-index-llms-cohere==0.4.0
 llama-index-llms-openai==0.3.29
 llama-index-multi-modal-llms-openai==0.4.3
 llama-index-program-openai==0.3.1
@@ -201,3 +199,7 @@ wrapt==1.17.2
 yarl==1.18.3
 zipp==3.21.0
 zstandard==0.23.0
+boto3==1.34.129
+redis>=5.0.0
+apscheduler>=3.10.0
+sentence-transformers>=2.5.0

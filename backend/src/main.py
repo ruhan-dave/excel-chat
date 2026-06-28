@@ -104,11 +104,9 @@ app = FastAPI(root_path='/api', lifespan=_lifespan)
 # Initialize the SQLite database on startup
 init_db()
 
-# list of allowed origins
-origins = [
-    "http://localhost:5173",
-    "http://vmm-45508.vm.duke.edu"
-]
+# list of allowed origins (configurable via env, comma-separated)
+_default_origins = "http://localhost:5173,http://localhost:3000"
+origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", _default_origins).split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,

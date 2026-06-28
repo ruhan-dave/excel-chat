@@ -1,25 +1,23 @@
-# Use the official Python image from the Docker Hub
-FROM python:3.10.12-slim
+FROM python:3.12-alpine
 
-# Set the working directory in the container
 WORKDIR /app
 
-# Copy requirements.txt to the container
+RUN apk update && \
+    apk upgrade --no-cache && \
+    rm -rf /var/cache/apk/*
+
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code to the container
-COPY . .
+RUN addgroup -S appgroup && adduser -S -G appgroup -h /home/appuser -s /bin/sh appuser
+USER appuser
 
-# Expose port 8000 for the Uvicorn server
-EXPOSE 8000
+COPY --chown=appuser:appuser . .
 
 WORKDIR /app/src
 
-# Default OpenRouter base URL (override via env at runtime)
 ENV OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
-# Define the command to run the Uvicorn server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

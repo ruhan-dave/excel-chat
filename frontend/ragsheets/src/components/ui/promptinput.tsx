@@ -3,26 +3,12 @@ import { Button } from "./button";
 import { useState } from "react";
 import axios from "axios";
 import BackdropWithSpinner from "./backdropWithSpinner";
-import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
-  } from "@/components/ui/table"
-
-const MessageIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" className="lucide lucide-send-horizontal">
-        <path d="M3.714 3.048a.498.498 0 0 0-.683.627l2.843 7.627a2 2 0 0 1 0 1.396l-2.842 7.627a.498.498 0 0 0 .682.627l18-8.5a.5.5 0 0 0 0-.904z"/>
-        <path d="M6 12h16"/>
-    </svg>
-);
+import { SendHorizontal, Calculator, Sparkles } from "lucide-react";
 
 const PromptInput = () => {
     const [isLoading, setLoading] = useState(false);
     const [query, setQuery] = useState("");
-    const [answer, setAnswer] = useState({});
+    const [answer, setAnswer] = useState<Record<string, unknown>>({});
     const [friendlyResponse, setFriendlyResponse] = useState("");
     const apiURL = import.meta.env.VITE_API_ENDPOINT;
     const submitQuery = async(query: string) => {
@@ -49,23 +35,19 @@ const PromptInput = () => {
     if(Object.keys(answer).length > 0)
     {
         answerBlock = (
-            <div className="mb-8">
-                <h3 className="text-lg font-semibold mb-4">Calculation Steps:</h3>
-                <Table>
-                    <TableHeader>
-                        <TableRow>
-                            <TableHead className="text-center">Step</TableHead>
-                            <TableHead className="text-center">Answer</TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        {Object.entries(answer).map(([key, value]) => <TableRow key={key}>
-                            <TableCell>{key}</TableCell>
-                            <TableCell>{String(value)}</TableCell>
-                        </TableRow>
-                        )}
-                    </TableBody>
-                </Table>
+            <div className="rounded-lg border bg-white shadow-sm">
+                <div className="flex items-center gap-2 border-b px-4 py-3">
+                    <Calculator className="h-4 w-4 text-muted-foreground" />
+                    <h3 className="text-sm font-semibold">Calculation Steps</h3>
+                </div>
+                <div className="divide-y">
+                    {Object.entries(answer).map(([key, value]) => (
+                        <div key={key} className="flex items-start gap-4 px-4 py-3">
+                            <span className="shrink-0 text-sm font-medium text-slate-600">{key}</span>
+                            <span className="text-sm text-slate-900">{String(value)}</span>
+                        </div>
+                    ))}
+                </div>
             </div>
         );
     }
@@ -73,24 +55,45 @@ const PromptInput = () => {
     if(friendlyResponse)
     {
         friendlyBlock = (
-            <div className="bg-blue-50 p-6 rounded-lg">
-                <h3 className="text-lg font-semibold mb-4 text-blue-900">Answer:</h3>
-                <div className="text-blue-800 whitespace-pre-wrap">{friendlyResponse}</div>
+            <div className="rounded-lg border border-blue-100 bg-blue-50/50 shadow-sm">
+                <div className="flex items-center gap-2 border-b border-blue-100 px-4 py-3">
+                    <Sparkles className="h-4 w-4 text-blue-600" />
+                    <h3 className="text-sm font-semibold text-blue-900">Answer</h3>
+                </div>
+                <div className="px-4 py-4 text-sm text-blue-900 whitespace-pre-wrap leading-relaxed">
+                    {friendlyResponse}
+                </div>
             </div>
         );
     }
 
     return (
-        <div className="py-8 sm:py-8">
-            <Textarea
-                value={query}
-                onChange = {(e) => setQuery(e.target.value)} 
-                placeholder="Enter your query here!" />
-            <Button onClick={(_) => submitQuery(query)} className="p-6 sm:p-6 rounded-2xl m-8 sm:m-8">
-                <MessageIcon />
-            </Button>
-            {friendlyBlock}
-            {answerBlock}
+        <div className="space-y-6">
+            <div className="flex items-end gap-3">
+                <Textarea
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Ask a question about your data..."
+                    className="min-h-[100px] resize-none"
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            submitQuery(query);
+                        }
+                    }}
+                />
+                <Button
+                    onClick={() => submitQuery(query)}
+                    disabled={!query.trim() || isLoading}
+                    className="h-[100px] shrink-0"
+                >
+                    <SendHorizontal className="h-5 w-5" />
+                </Button>
+            </div>
+            <div className="space-y-4">
+                {friendlyBlock}
+                {answerBlock}
+            </div>
             {isLoading && <BackdropWithSpinner />}
         </div>
     );

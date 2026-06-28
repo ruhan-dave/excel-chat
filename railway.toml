@@ -1,0 +1,7 @@
+[services.backend]
+root = "backend"
+dockerfilePath = "Dockerfile"
+
+[services.frontend]
+root = "frontend"
+dockerfilePath = "Dockerfile"

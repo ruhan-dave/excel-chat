@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 RUN groupadd appgroup && useradd -G appgroup -m -s /bin/bash appuser
+RUN mkdir -p /app/data && chown appuser:appgroup /app/data
 USER appuser
 
 COPY --chown=appuser:appuser . .

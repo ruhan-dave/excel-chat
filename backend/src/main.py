@@ -1,11 +1,12 @@
-from fastapi import FastAPI, Header, UploadFile
+from fastapi import FastAPI, Header, UploadFile, HTTPException
 from excelservices import ExcelService
 # from vectordbservices import VectorDBService  # ChromaDB disabled
 from queryservices import QueryService
 import pandas as pd
 from io import StringIO, BytesIO
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pipeline import build_query_pipeline, generate_user_friendly_response
 import os
 import uuid
@@ -118,11 +119,6 @@ app.add_middleware(
 
 UPLOAD_FOLDER = './uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-
-@app.get("/")
-async def root():
-    return {"message": "Hello world!"}
 
 
 # ============================================================================
@@ -552,3 +548,22 @@ async def cleanup_run(max_age_days: int = 90, cache_max_age_days: int = 7):
     is the normal path.
     """
     return daily_cleanup(max_age_days=max_age_days, cache_max_age_days=cache_max_age_days)
+
+
+# ============================================================================
+# Serve frontend static files (SPA)
+# ============================================================================
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+if _STATIC_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        index = _STATIC_DIR / "index.html"
+        if index.exists():
+            return FileResponse(str(index))
+        raise HTTPException(status_code=404, detail="Frontend not built")

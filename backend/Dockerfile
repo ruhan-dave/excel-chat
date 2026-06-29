@@ -1,3 +1,15 @@
+# Stage 1: Build the React frontend
+FROM node:20-slim AS frontend-build
+
+WORKDIR /frontend
+
+COPY frontend/ragsheets/package.json frontend/ragsheets/package-lock.json ./
+RUN npm install
+
+COPY frontend/ragsheets/ ./
+RUN npm run build
+
+# Stage 2: Python backend with frontend static files
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -9,14 +21,17 @@ RUN apt-get update && \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /app/data
 
-COPY . .
+COPY backend/ .
+
+# Copy built frontend into the container
+COPY --from=frontend-build /frontend/dist /app/static
 
 WORKDIR /app/src
 

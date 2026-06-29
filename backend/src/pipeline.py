@@ -191,6 +191,17 @@ class QueryPlan(BaseModel):
         return v
 
 
+def _flatten_value(v: Any) -> Any:
+    """Flatten dict/list values to readable strings so the frontend doesn't show [object Object]."""
+    if isinstance(v, dict):
+        if "value" in v and len(v) == 1:
+            return v["value"]
+        return json.dumps(v, default=str)
+    if isinstance(v, list):
+        return json.dumps(v, default=str)
+    return v
+
+
 class ExecutionResult(BaseModel):
     """Result of executing a query plan."""
     step_results: dict[str, Any] = Field(
@@ -204,6 +215,19 @@ class ExecutionResult(BaseModel):
         default="",
         description="Brief explanation of how the answer was derived.",
     )
+    friendly_response: str = Field(
+        default="",
+        description="A clear, natural language response to the user's question. "
+        "Include specific numerical values with proper formatting (currency, percentages). "
+        "Briefly explain how the answer was derived. Use a friendly, professional tone.",
+    )
+
+    @field_validator("final_answer", "step_results", mode="before")
+    @classmethod
+    def _flatten_nested_objects(cls, v):
+        if isinstance(v, dict):
+            return {k: _flatten_value(val) for k, val in v.items()}
+        return _flatten_value(v)
 
 
 class FriendlyResponse(BaseModel):
@@ -241,7 +265,7 @@ class PipelineDeps:
 def build_openrouter_model() -> OpenAIModel:
     """Create an OpenAIModel configured for OpenRouter."""
     return OpenAIModel(
-        model_name="deepseek/deepseek-v4-flash",
+        model_name=os.environ.get("MODEL_ID", "deepseek/deepseek-v4-flash"),
         base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         api_key=os.environ.get("OPENROUTER_API_KEY"),
     )
@@ -613,7 +637,8 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
        percentage_change, difference): either compute directly in Python or use execute_python_code
     3. For compute steps: call execute_python_code with Python code that performs the full
        calculation using the retrieved values as literal numbers
-    4. Return the final answer as structured data
+    4. Return the final answer as structured data, including a friendly_response field
+       with a clear, natural language answer to the user's question.
 
     When retrieve returns multiple values (from searching all sheets), parse them carefully.
     The format is "SheetName: value; SheetName2: value2".
@@ -657,6 +682,48 @@ def build_responder_agent() -> Agent[None, str]:
         """,
         model_settings={"temperature": 0.3},
     )
+
+
+def _format_simple_response(query: str, plan: QueryPlan, execution: ExecutionResult) -> str | None:
+    """Generate a deterministic response for simple queries without calling the LLM.
+
+    Returns None if the query is complex enough to warrant the responder agent.
+    Handles:
+    - Single retrieve_numbers (1 item): "Revenue in 2022 was $1,234,567"
+    - Simple named operations with explanation: "The sum is $2,000"
+    """
+    step_results = execution.step_results or {}
+    final = execution.final_answer
+    explanation = execution.explanation or ""
+
+    # Case 1: retrieve_numbers with 1-2 items
+    if plan.task_type == "retrieve_numbers" and plan.items:
+        if len(plan.items) <= 2:
+            parts = []
+            for item in plan.items:
+                fields = [f.strip() for f in item.split(",")]
+                if len(fields) == 2:
+                    field_name, year = fields
+                    val = final if len(plan.items) == 1 else step_results.get(f"item_{fields[0]}_{fields[1]}", final)
+                    parts.append(f"{field_name} in {year}: {val}")
+                elif len(fields) == 3:
+                    sheet_name, field_name, year = fields
+                    parts.append(f"{field_name} in {year} ({sheet_name}): {final}")
+            if parts:
+                return "  |  ".join(parts)
+
+    # Case 2: single-step plan with a clear explanation
+    if plan.plan and len(plan.plan) == 1 and explanation:
+        step_name = list(plan.plan.keys())[0]
+        step = plan.plan[step_name]
+        val = step_results.get(step_name, final)
+        if step.action == "retrieve":
+            return f"{explanation}: {val}"
+        # Simple named ops with explanation
+        if val is not None and explanation:
+            return f"{explanation}: {val}"
+
+    return None
 
 
 # ============================================================================
@@ -739,17 +806,12 @@ def build_query_pipeline(
         except Exception as e:
             print(f"⚠️ Post-execution caching failed: {e}")
 
-        # Step 3: Respond
-        responder = build_responder_agent()
-        resp_prompt = f"""User's Question: {query}
-
-        Execution Results:
-        {json.dumps(execution.model_dump(), indent=2)}
-
-        Provide a clear, natural language response."""
-        resp_result = await responder.run(resp_prompt)
-        friendly: str = resp_result.data
-        print(f"📝 Response: {friendly[:100]}...")
+        # Step 3: Use executor's friendly_response (merged responder)
+        friendly = execution.friendly_response or _format_simple_response(query, plan, execution) or ""
+        if friendly:
+            print(f"📝 Response: {friendly[:100]}...")
+        else:
+            print("⚠️ No friendly response generated")
 
         return {
             "answer": execution.model_dump(),

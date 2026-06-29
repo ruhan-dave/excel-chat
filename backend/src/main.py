@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pipeline import build_query_pipeline, generate_user_friendly_response
+import json
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -322,8 +323,22 @@ async def query_rag(
                     f"⚡ Semantic cache hit for user={user_id} "
                     f"(similarity={similarity:.3f}): '{query[:60]}'"
                 )
+                try:
+                    cached_result = json.loads(cached_response)
+                except (json.JSONDecodeError, TypeError):
+                    cached_result = None
+                if isinstance(cached_result, dict):
+                    return {
+                        "answer": cached_result.get("answer", cached_response),
+                        "friendly_response": cached_result.get("friendly_response", ""),
+                        "cached": True,
+                        "cache_type": "semantic",
+                        "similarity": similarity,
+                        "user_id": user_id,
+                    }
                 return {
                     "answer": cached_response,
+                    "friendly_response": "",
                     "cached": True,
                     "cache_type": "semantic",
                     "similarity": similarity,
@@ -418,15 +433,13 @@ async def query_rag(
         # Store the result in the semantic cache for future paraphrased hits.
         # ------------------------------------------------------------------
         try:
-            response_text = (
-                result.get("answer") if isinstance(result, dict) else str(result)
-            )
-            if response_text:
+            cache_payload = json.dumps(result) if isinstance(result, dict) else str(result)
+            if cache_payload:
                 store_cached(
                     user_id=user_id,
                     query=query,
                     query_embedding=embed_query(query),
-                    response=str(response_text),
+                    response=cache_payload,
                     model=cache_model,
                 )
         except Exception as e:

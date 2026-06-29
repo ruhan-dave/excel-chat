@@ -44,7 +44,11 @@ const PromptInput = () => {
                     {Object.entries(answer).map(([key, value]) => (
                         <div key={key} className="flex items-start gap-4 px-4 py-3">
                             <span className="shrink-0 text-sm font-medium text-slate-600">{key}</span>
-                            <span className="text-sm text-slate-900">{String(value)}</span>
+                            <span className="text-sm text-slate-900">
+                                {typeof value === 'object' && value !== null
+                                    ? JSON.stringify(value, null, 2)
+                                    : String(value)}
+                            </span>
                         </div>
                     ))}
                 </div>

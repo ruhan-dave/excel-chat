@@ -557,12 +557,13 @@ async def cleanup_run(max_age_days: int = 90, cache_max_age_days: int = 7):
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 if _STATIC_DIR.is_dir():
-    app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
-
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
+        file_path = _STATIC_DIR / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
         index = _STATIC_DIR / "index.html"
         if index.exists():
             return FileResponse(str(index))

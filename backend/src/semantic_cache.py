@@ -23,7 +23,7 @@ Storage tiers
 
 Lazy loading
 ------------
-The SentenceTransformer model (``Qwen/Qwen3-Embedding-8B``, ~16 GB) is loaded
+The SentenceTransformer model (``all-MiniLM-L6-v2``, ~80 MB) is loaded
 on first use, NOT at import time. ``import semantic_cache`` is side-effect-free
 even if the model isn't downloaded yet.
 """
@@ -56,8 +56,8 @@ except ImportError:  # pragma: no cover
 # Embedding model singleton
 # ---------------------------------------------------------------------------
 
-_MODEL_NAME = "Qwen/Qwen3-Embedding-8B"
-_EMBED_DIM = 1024  # truncated from native dim to 1024 for cache efficiency
+_MODEL_NAME = "all-MiniLM-L6-v2"
+_EMBED_DIM = 384  # MiniLM native dim is 384
 
 _model_lock = threading.Lock()
 _model: Any | None = None
@@ -82,7 +82,7 @@ def _get_model():
         if _model is not None:
             return _model
         try:
-            _model = SentenceTransformer(_MODEL_NAME, truncate_dim=_EMBED_DIM)
+            _model = SentenceTransformer(_MODEL_NAME)
         except Exception as e:  # network error, corrupt cache, etc.
             _model_load_failed = True
             print(
@@ -101,7 +101,7 @@ def reset_model() -> None:
 
 
 def embed_query(text: str) -> np.ndarray | None:
-    """Embed a single query into a 1024-dim L2-normalized NumPy vector.
+    """Embed a single query into a 384-dim L2-normalized NumPy vector.
 
     Returns None if the model isn't available. Callers should treat None as
     "semantic caching is unavailable; skip this lookup".
@@ -172,7 +172,7 @@ def _ensure_redis_index(r: Any) -> bool:
 def find_similar_cached(
     user_id: str,
     query_embedding: np.ndarray | None,
-    threshold: float = 0.92,
+    threshold: float = 0.88,
 ) -> tuple[str | None, float]:
     """Look up a cached response whose embedding is similar to ``query_embedding``.
 

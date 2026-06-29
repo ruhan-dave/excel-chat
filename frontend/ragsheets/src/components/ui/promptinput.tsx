@@ -20,10 +20,16 @@ const PromptInput = () => {
                 },
                 timeout: 120000  // 2 minute timeout for LLM processing
             });
-            setAnswer(response.data.answer);
-            setFriendlyResponse(response.data.friendly_response);
+            if (response.data.error) {
+                setAnswer({});
+                setFriendlyResponse(`Error: ${response.data.error}`);
+            } else {
+                setAnswer(response.data.answer ?? {});
+                setFriendlyResponse(response.data.friendly_response ?? "");
+            }
         } catch (error) {
             console.error("Query failed:", error);
+            setAnswer({});
             setFriendlyResponse("Error: Failed to get response from server. Please check if the file is uploaded correctly.");
         }
         setLoading(false);

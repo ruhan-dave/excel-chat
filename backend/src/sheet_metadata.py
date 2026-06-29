@@ -6,6 +6,7 @@ Excel files are stored in S3; metadata is stored locally in SQLite.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import boto3
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -199,6 +201,27 @@ def download_from_s3(s3_key: str, local_path: str) -> None:
     """Download a file from S3 to a local path."""
     s3 = _get_s3_client()
     s3.download_file(S3_BUCKET, s3_key, local_path)
+
+
+def read_excel_from_s3(s3_key: str) -> dict[str, pd.DataFrame]:
+    """Read an Excel file from S3 directly into pandas DataFrames without writing to disk.
+
+    Streams the file content into a BytesIO buffer, then parses all sheets
+    from that buffer. This avoids the disk write + disk read round-trip
+    needed when using ``download_from_s3`` + ``pandas.read_excel(filepath)``.
+
+    The returned dict maps sheet_name -> cleaned DataFrame. Sheets that fail
+    cleaning are skipped with a warning (same behavior as
+    ``ExcelService.load_all_sheets``).
+
+    Optimization 5: avoids ~2-3s of disk I/O per file per query.
+    """
+    from excelservices import ExcelService
+
+    s3 = _get_s3_client()
+    response = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
+    buffer = io.BytesIO(response["Body"].read())
+    return ExcelService.load_all_sheets_buffer(buffer)
 
 
 def delete_from_s3(s3_key: str) -> None:

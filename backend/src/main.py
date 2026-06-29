@@ -7,7 +7,7 @@ from io import StringIO, BytesIO
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from pipeline import build_query_pipeline, generate_user_friendly_response
+from pipeline import build_query_pipeline, generate_user_friendly_response, timed
 import json
 import os
 import uuid
@@ -22,6 +22,7 @@ from sheet_metadata import (
     init_db, save_file, save_sheet, get_all_sheets, get_all_files,
     update_sheet_description, delete_file, get_sheets_by_file,
     upload_to_s3, download_from_s3, delete_from_s3, SheetMeta,
+    read_excel_from_s3,
     get_cache_stats, cleanup_old_cache_entries,
     touch_file_access, find_stale_files, delete_files_older_than,
     invalidate_user_cache as sqlite_invalidate_user_cache,
@@ -308,16 +309,20 @@ async def query_rag(
         # The actual model selection happens inside build_query_pipeline.
         cache_model = os.environ.get("RAG_MODEL", "openrouter/query-pipeline")
 
+        # Optimization 6: per-stage timing dict surfaced to the client.
+        timings: dict[str, float] = {}
+
         # ------------------------------------------------------------------
         # Semantic cache check (per-user). Embed the query and look for a
         # semantically-similar cached response above the similarity threshold.
         # On hit, return the cached response without invoking the LLM pipeline.
         # ------------------------------------------------------------------
         try:
-            query_embedding = embed_query(query)
-            cached_response, similarity = find_similar_cached(
-                user_id, query_embedding, threshold=0.92
-            )
+            with timed("semantic_cache_lookup", timings):
+                query_embedding = embed_query(query)
+                cached_response, similarity = find_similar_cached(
+                    user_id, query_embedding, threshold=0.88
+                )
             if cached_response is not None:
                 print(
                     f"⚡ Semantic cache hit for user={user_id} "
@@ -359,43 +364,36 @@ async def query_rag(
         if not all_sheet_metas:
             return {"error": "No sheets uploaded. Please upload an Excel file first."}
 
-        # Download each file from S3 and load sheets into DataFrames
-        # Group sheets by file to avoid re-downloading
-        file_cache: dict[str, str] = {}  # s3_key -> local_path
-        sheets: dict[str, pd.DataFrame] = {}
-        touched_file_ids: set[str] = set()
+        # Read each file from S3 directly into memory (no local temp file).
+        # Cache the parsed sheets dict per s3_key so multiple sheet_metas
+        # pointing at the same file only fetch + parse once.
+        # Optimization 5: avoids ~2-3s of disk I/O per file per query.
+        # Optimization 6: wrapped in ``timed`` so the I/O cost is visible.
+        with timed("s3_load", timings):
+            file_cache: dict[str, dict[str, pd.DataFrame]] = {}  # s3_key -> sheets dict
+            sheets: dict[str, pd.DataFrame] = {}
+            touched_file_ids: set[str] = set()
 
-        for meta in all_sheet_metas:
-            if meta.s3_key not in file_cache:
-                local_path = os.path.join(UPLOAD_FOLDER, f"temp_{meta.file_id}_{meta.file_name}")
-                try:
-                    download_from_s3(meta.s3_key, local_path)
-                    file_cache[meta.s3_key] = local_path
-                except Exception as e:
-                    print(f"⚠️ Could not download {meta.s3_key}: {e}")
-                    continue
+            for meta in all_sheet_metas:
+                if meta.s3_key not in file_cache:
+                    try:
+                        file_cache[meta.s3_key] = read_excel_from_s3(meta.s3_key)
+                    except Exception as e:
+                        print(f"⚠️ Could not read {meta.s3_key} from S3: {e}")
+                        continue
 
-            filepath = file_cache[meta.s3_key]
-            try:
-                cleaned = ExcelService.load_all_sheets(filepath)
-                if meta.sheet_name in cleaned:
-                    sheets[meta.sheet_name] = cleaned[meta.sheet_name]
+                all_sheets = file_cache[meta.s3_key]
+                if meta.sheet_name in all_sheets:
+                    sheets[meta.sheet_name] = all_sheets[meta.sheet_name]
                     touched_file_ids.add(meta.file_id)
-            except Exception as e:
-                print(f"⚠️ Could not load sheet '{meta.sheet_name}': {e}")
 
-        # Mark files whose sheets were queried as recently accessed so the
-        # daily cleanup cron knows they're still in active use.
-        for fid in touched_file_ids:
-            try:
-                touch_file_access(fid)
-            except Exception as e:
-                print(f"⚠️ Could not touch last_accessed for {fid}: {e}")
-
-        # Clean up temp files
-        for local_path in file_cache.values():
-            if os.path.exists(local_path):
-                os.remove(local_path)
+            # Mark files whose sheets were queried as recently accessed so the
+            # daily cleanup cron knows they're still in active use.
+            for fid in touched_file_ids:
+                try:
+                    touch_file_access(fid)
+                except Exception as e:
+                    print(f"⚠️ Could not touch last_accessed for {fid}: {e}")
 
         if not sheets:
             return {"error": "No valid sheets could be loaded."}
@@ -427,35 +425,50 @@ async def query_rag(
             client, sheets, all_sheet_metas, PromptTemplate(template),
             user_id=user_id,
         )
-        result = await pipeline(query)
+        with timed("pipeline", timings):
+            result = await pipeline(query)
+        # Pipeline returns its own stage timings (planner/executor) — merge.
+        if isinstance(result, dict):
+            pipeline_timings = result.get("timings") or {}
+            if isinstance(pipeline_timings, dict):
+                timings.update(pipeline_timings)
 
         # ------------------------------------------------------------------
         # Store the result in the semantic cache for future paraphrased hits.
+        # Optimization 6: wrap in ``timed`` so embedding cost is visible.
         # ------------------------------------------------------------------
-        try:
-            cache_payload = json.dumps(result) if isinstance(result, dict) else str(result)
-            if cache_payload:
-                store_cached(
-                    user_id=user_id,
-                    query=query,
-                    query_embedding=embed_query(query),
-                    response=cache_payload,
-                    model=cache_model,
-                )
-        except Exception as e:
-            print(f"⚠️ Failed to write semantic cache entry: {e}")
+        with timed("cache_write", timings):
+            try:
+                cache_payload = json.dumps(result) if isinstance(result, dict) else str(result)
+                if cache_payload:
+                    store_cached(
+                        user_id=user_id,
+                        query=query,
+                        query_embedding=embed_query(query),
+                        response=cache_payload,
+                        model=cache_model,
+                    )
+            except Exception as e:
+                print(f"⚠️ Failed to write semantic cache entry: {e}")
 
         # Tag the response with cache metadata so the front-end can show it.
         if isinstance(result, dict):
             result.setdefault("cached", False)
             result.setdefault("cache_type", "miss")
             result.setdefault("user_id", user_id)
+            # Surface per-stage timings so the front-end can display them.
+            total = sum(timings.values())
+            print(f"⏱️  query_rag total: {total:.2f}s | {timings}")
+            result["timings"] = timings
         return result
     except Exception as e:
         print(f"Error in query_rag: {str(e)}")
         import traceback
         traceback.print_exc()
-        return {"error": str(e)}
+        error_msg = str(e)
+        if "Exceeded maximum retries" in error_msg:
+            error_msg = "The AI model could not process this query. Please try rephrasing your question."
+        return {"error": error_msg}
 
 
 # ============================================================================

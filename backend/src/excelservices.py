@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import uuid
@@ -53,6 +54,34 @@ class ExcelService:
             Sheets that fail cleaning are skipped with a warning.
         """
         raw_sheets = pd.read_excel(filepath, sheet_name=None)
+        cleaned: dict[str, pd.DataFrame] = {}
+        for name, df in raw_sheets.items():
+            try:
+                cleaned_df = ExcelService.clean_dataframe(df)
+                cleaned[name] = cleaned_df
+            except (ValueError, Exception) as e:
+                print(f"⚠️ Skipping sheet '{name}': {e}")
+        return cleaned
+
+    @staticmethod
+    def load_all_sheets_buffer(buffer: io.BytesIO) -> dict[str, pd.DataFrame]:
+        """
+        Load all sheets from an in-memory Excel file buffer and clean each one.
+
+        This is the in-memory counterpart to ``load_all_sheets``: instead of
+        reading from a path on disk, ``pandas.read_excel`` reads from a
+        ``BytesIO`` buffer. This avoids the disk write + disk read round-trip
+        when the Excel file content has already been fetched into memory
+        (e.g. streamed from S3).
+
+        Optimization 5: used by ``sheet_metadata.read_excel_from_s3`` to skip
+        the local temp-file write.
+
+        Returns:
+            dict mapping sheet_name -> cleaned DataFrame.
+            Sheets that fail cleaning are skipped with a warning.
+        """
+        raw_sheets = pd.read_excel(buffer, sheet_name=None)
         cleaned: dict[str, pd.DataFrame] = {}
         for name, df in raw_sheets.items():
             try:
@@ -161,7 +190,7 @@ class ExcelService:
 
         fields_str = ", ".join(sheet.fields[:20])
         years_str = ", ".join(sheet.years)
-        model = "deepseek/deepseek-v4-flash"
+        model = "openai/gpt-oss-120b:nitro"
         prompt = (
             f"Sheet: {sheet.sheet_name} | Fields: {fields_str} | "
             f"Years: {years_str} | Rows: {sheet.row_count}\n"

@@ -254,3 +254,27 @@ A TypeScript type mismatch in the frontend component caused values to be rendere
 Fixed the value parsing logic in the TSX component to correctly handle the JSON response structure.
 
 **File:** `frontend/ragsheets/src/components/ui/promptinput.tsx`
+
+---
+
+## Bug 11: App Crashes on Backend Error Response (Blank Screen)
+
+**Status:** Fixed (uncommitted)
+**Date:** 2026-06-29
+**Severity:** Critical
+
+### Symptom
+
+After redeploying, asking a question caused the entire app to go blank. No error message, no UI elements — just a white screen.
+
+### Root Cause
+
+When the planner agent fails validation (`Exceeded maximum retries (3) for result validation`), the backend catches the exception and returns `{"error": "..."}` with HTTP 200. The frontend's `submitQuery` called `setAnswer(response.data.answer)` — but `response.data.answer` is `undefined` when the response only has an `error` field. This set the React state to `undefined`, and the subsequent `Object.keys(answer)` in the render threw a `TypeError: Cannot convert undefined to object`, crashing the entire React component tree with no error boundary to catch it.
+
+### Fix
+
+1. **Frontend**: Check for `response.data.error` before accessing `answer`/`friendly_response`. On error, show the error message in the friendly response block instead of crashing. Also use `?? {}` and `?? ""` fallbacks to prevent `undefined` from ever reaching state.
+
+2. **Backend**: Map the opaque `Exceeded maximum retries` error to a user-friendly message: "The AI model could not process this query. Please try rephrasing your question."
+
+**Files:** `frontend/ragsheets/src/components/ui/promptinput.tsx`, `backend/src/main.py`

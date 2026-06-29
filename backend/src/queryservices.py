@@ -48,7 +48,7 @@ class QueryService:
         OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
         response = client.chat.completions.create(
-            model="deepseek/deepseek-v4-flash",
+            model="openai/gpt-oss-120b:nitro",
             messages=[
                 {"role": "system", "content": self.PREAMBLE + "\n\nUse the following documents to answer the user's question:\n" + context},
                 {"role": "user", "content": query}

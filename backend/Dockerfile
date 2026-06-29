@@ -1,7 +1,11 @@
 # Stage 1: Build the React frontend
-FROM node:20-slim AS frontend-build
+FROM node:22-bookworm-slim AS frontend-build
 
 WORKDIR /frontend
+
+RUN apt-get update && \
+    apt-get dist-upgrade -y && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY frontend/ragsheets/package.json frontend/ragsheets/package-lock.json ./
 RUN npm install
@@ -10,12 +14,12 @@ COPY frontend/ragsheets/ ./
 RUN npm run build
 
 # Stage 2: Python backend with frontend static files
-FROM python:3.12-slim
+FROM python:3.12.12-slim-bookworm
 
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get upgrade -y && \
+    apt-get dist-upgrade -y && \
     apt-get install -y --no-install-recommends \
     build-essential \
     libffi-dev \

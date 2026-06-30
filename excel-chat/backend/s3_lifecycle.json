@@ -1,0 +1,19 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-uploads-90d",
+      "Filter": {"Prefix": "uploads/"},
+      "Status": "Enabled",
+      "Transitions": [
+        {"Days": 30, "StorageClass": "STANDARD_IA"}
+      ],
+      "Expiration": {"Days": 90}
+    },
+    {
+      "ID": "cleanup-incomplete",
+      "Filter": {"Prefix": "uploads/"},
+      "Status": "Enabled",
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}
+    }
+  ]
+}

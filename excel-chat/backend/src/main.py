@@ -33,6 +33,15 @@ from semantic_cache import (
     is_available as semantic_cache_available,
 )
 from pydantic import BaseModel as PydanticBaseModel
+from guardrails import (
+    validate_file_upload,
+    screen_query,
+    inject_disclaimer,
+    check_data_sensitivity,
+    ACCEPTED_EXTENSIONS,
+    MAX_FILE_SIZE_BYTES,
+    MAX_SPREADSHEET_ROWS,
+)
 
 load_dotenv()
 
@@ -134,16 +143,21 @@ async def create_upload_file(
 ):
     user_id = x_user_id or "anonymous"
     print(f"Received file upload request. Filename: {excelFile.filename}, user_id={user_id}")
-    if not excelFile.filename:
-        return JSONResponse(content={"message": "No file provided"}, status_code=400)
-    if not excelFile.filename.endswith(('.xlsx', '.xls', '.numbers')):
-        return JSONResponse(content={"message": f"Invalid file format: {excelFile.filename}. Please upload .xlsx, .xls, or .numbers files"}, status_code=400)
 
-    # Save locally temporarily
+    # --- Guardrail Layer 1: File format & size validation ---
+    file_size = 0
     filepath = os.path.join(UPLOAD_FOLDER, excelFile.filename)
     with open(filepath, "wb") as f:
         while chunk := await excelFile.read(1024 * 1024):
+            file_size += len(chunk)
             f.write(chunk)
+
+    upload_check = validate_file_upload(excelFile.filename, file_size=file_size)
+    if not upload_check.allowed:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        print(f"🚫 Upload rejected: {upload_check.reason}")
+        return JSONResponse(content=upload_check.reject_dict(), status_code=400)
 
     # Generate IDs
     file_id = str(uuid.uuid4())
@@ -161,6 +175,17 @@ async def create_upload_file(
     try:
         sheet_metas = ExcelService.load_sheet_metadata_from_file(filepath, file_id, excelFile.filename, s3_key)
         print(f"Found {len(sheet_metas)} sheets in {excelFile.filename}")
+
+        # Guardrail: check row count for spreadsheets
+        max_rows = max((m.row_count for m in sheet_metas), default=0)
+        row_check = validate_file_upload(
+            excelFile.filename, file_size=file_size, row_count=max_rows
+        )
+        if not row_check.allowed:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            print(f"🚫 Upload rejected: {row_check.reason} (max_rows={max_rows})")
+            return JSONResponse(content=row_check.reject_dict(), status_code=400)
 
         # Detect schema groups
         ExcelService.detect_schema_groups(sheet_metas)
@@ -305,6 +330,13 @@ async def query_rag(
             return {"error": "OpenRouter API key not found"}
 
         user_id = x_user_id or "anonymous"
+
+        # --- Guardrail Layers 2-4: Screen query before processing ---
+        query_check = screen_query(query, user_id=user_id)
+        if not query_check.allowed:
+            print(f"🚫 Query rejected: {query_check.reason}")
+            return JSONResponse(content=query_check.reject_dict(), status_code=400)
+
         # Used as the cache key namespace and as the model label for caching.
         # The actual model selection happens inside build_query_pipeline.
         cache_model = os.environ.get("RAG_MODEL", "openrouter/query-pipeline")
@@ -502,6 +534,13 @@ async def query_stream(
             OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
             if not OPENROUTER_API_KEY:
                 yield f"event: error\ndata: {json.dumps({'message': 'OpenRouter API key not found'})}\n\n"
+                return
+
+            # --- Guardrail Layers 2-4: Screen query before processing ---
+            query_check = screen_query(query, user_id=user_id)
+            if not query_check.allowed:
+                print(f"🚫 Query rejected: {query_check.reason}")
+                yield f"event: error\ndata: {json.dumps(query_check.reject_dict())}\n\n"
                 return
 
             # --- Semantic cache check ---

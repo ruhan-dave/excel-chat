@@ -1,0 +1,435 @@
+### Comprehensive Description of the Table
+
+The table presents a financial overview of Meta Platforms, Inc. for the second quarter, ending June 30, 2024, in comparison to the same period in 2023. The key financial metrics outlined in the table are revenue, costs and expenses, income from operations, operating margin, provision for income taxes, effective tax rate, net income, and diluted earnings per share (EPS). 
+
+1. **Revenue**: Meta reported revenue of $39.071 billion in Q2 2024, a 22% increase from $31.999 billion in Q2 2023.
+
+2. **Costs and Expenses**: Costs and expenses for Q2 2024 amounted to $24.224 billion, up 7% from $22.607 billion in Q2 2023.
+
+3. **Income from Operations**: The income from operations saw a significant rise of 58%, reaching $14.847 billion in Q2 2024, compared to $9.392 billion in Q2 2023.
+
+4. **Operating Margin**: The operating margin improved to 38% in Q2 2024 from 29% in the same quarter of the previous year.
+
+5. **Provision for Income Taxes**: The provision for income taxes was $1.641 billion in Q2 2024, marking a 9% rise from $1.505 billion in 2023.
+
+6. **Effective Tax Rate**: The effective tax rate decreased to 11% in Q2 2024, down from 16% in Q2 2023.
+
+7. **Net Income**: Net income greatly increased by 73% to $13.465 billion for Q2 2024 from $7.788 billion in Q2 2023.
+
+8. **Diluted Earnings Per Share (EPS)**: Diluted EPS also reflected a 73% increase, moving from $2.98 in Q2 2023 to $5.16 in Q2 2024.
+
+### Markdown Representation of the Table
+
+```markdown
+| Financial Metric                         | Q2 2024 Amount ($ Millions) | Q2 2023 Amount ($ Millions) | % Change |
+|------------------------------------------|-----------------------------|-----------------------------|----------|
+| Revenue                                  | 39,071                      | 31,999                      | 22%      |
+| Costs and Expenses                       | 24,224                      | 22,607                      | 7%       |
+| Income from Operations                   | 14,847                      | 9,392                       | 58%      |
+| Operating Margin                         | 38%                         | 29%                         | -        |
+| Provision for Income Taxes               | 1,641                       | 1,505                       | 9%       |
+| Effective Tax Rate                       | 11%                         | 16%                         | -        |
+| Net Income                               | 13,465                      | 7,788                       | 73%      |
+| Diluted Earnings Per Share (EPS)         | 5.16                        | 2.98                        | 73%      |
+```
+
+This table provides a succinct summary of Meta's financial performance, highlighting the growth and efficiency improvements in the company's operations over the one-year period.
+The table presented shows the condensed consolidated statements of income for Meta Platforms, Inc., comparing financial performance metrics for the three months ending June 30, 2024, and 2023. It also provides data for the six months ended June 30 for both years. The numbers are in millions of dollars, except where per share values are involved. Key metrics listed include Revenue, Costs and Expenses broken down into several categories, Income from Operations, Interest and Other Income (Expense), Income Before Provision for Income Taxes, Provision for Income Taxes, and Net Income. Additionally, there's information on Earnings Per Share, both Basic and Diluted, alongside the weighted-average shares used to compute these per share amounts.
+
+Key insights from the table:
+
+1. **Revenue:** There was a significant increase in revenue from $31,999 million in 2023 to $39,071 million in 2024, showing a positive growth trajectory.
+   
+2. **Costs and Expenses:** This section is divided into Cost of Revenue, Research and Development, Marketing and Sales, and General and Administrative expenses. While total expenses increased from $22,607 million in 2023 to $24,224 million in 2024, the most notable increase was in Research and Development.
+
+3. **Income from Operations:** Reflects strong operational efficiency, growing substantially from $9,392 million in 2023 to $14,847 million in 2024.
+
+4. **Net Income:** There is a substantial increase in net income from $7,788 million to $13,465 million year-over-year.
+
+5. **Earnings Per Share:** Both basic and diluted earnings per share showed significant growth, reflecting improved profitability per share issued.
+
+Below is the table in markdown format:
+
+```markdown
+### Meta Platforms, Inc. Condensed Consolidated Statements of Income
+
+| Metric                                         | Three Months Ended June 30, 2024 | Three Months Ended June 30, 2023 | Six Months Ended June 30, 2024 | Six Months Ended June 30, 2023 |
+|------------------------------------------------|-----------------------------------|----------------------------------|--------------------------------|-------------------------------|
+| **Revenue**                                    | $39,071                           | $31,999                          | $75,527                        | $60,645                       |
+| **Costs and Expenses:**                          |                                   |                                  |                                |                               |
+| - Cost of Revenue                              | 7,308                             | 5,945                            | 13,948                         | 12,054                        |
+| - Research and Development                     | 10,537                            | 9,344                            | 20,515                         | 18,725                        |
+| - Marketing and Sales                          | 2,721                             | 3,154                            | 5,285                          | 6,198                         |
+| - General and Administrative (1)               | 3,658                             | 4,164                            | 7,114                          | 7,049                         |
+| **Total Costs and Expenses**                   | 24,224                            | 22,607                           | 46,862                         | 44,026                        |
+| **Income from Operations**                     | 14,847                            | 9,392                            | 28,665                         | 16,619                        |
+| **Interest and Other Income (Expense), Net**   | 259                               | (99)                             | 624                            | (19)                          |
+| **Income Before Provision for Income Taxes**   | 15,106                            | 9,293                            | 29,289                         | 16,600                        |
+| **Provision for Income Taxes**                 | 1,641                             | 1,505                            | 3,455                          | 3,102                         |
+| **Net Income**                                 | $13,465                           | $7,788                           | $25,834                        | $13,498                       |
+| **Earnings Per Share:**                         |                                   |                                  |                                |                               |
+| - Basic                                        | $5.31                             | $3.03                            | $10.17                         | $5.24                         |
+| - Diluted                                      | $5.16                             | $2.98                            | $9.86                          | $5.18                         |
+| **Weighted-average shares used to compute EPS:** |                                    |                                  |                                |                               |
+| - Basic                                        | 2,534                             | 2,568                            | 2,540                          | 2,577                         |
+| - Diluted                                      | 2,610                             | 2,612                            | 2,619                          | 2,604                         |
+
+*(1) The second quarter 2024 general and administrative expenses include a charge for the recent settlement with the State of Texas. The settlement amount is fully accrued as of June 30, 2024.*
+```
+
+This table offers a detailed snapshot of Meta's financial health, emphasizing increased revenue and net income, alongside robust operational performance over the periods compared. The inclusion of both quarterly and half-year figures provides a broader perspective on the company's financial trajectory.
+The table provided is an excerpt from Meta Platforms, Inc.'s financial summary for the second quarter of 2024. Specifically, it highlights the earnings per share, both basic and diluted, for the three months ended June 30, 2024. The table provides three key data points:
+
+1. **Earnings per Share (EPS)**: This is broken down into two types:
+   - **Basic EPS**: $5.31 per share, which represents the company's net income divided by the weighted-average number of outstanding shares during the period. It reflects the earnings available to each share of common stock.
+   - **Diluted EPS**: $5.16 per share, which takes into account all potential shares that could be created through convertible securities, options, or other similar mechanisms. This measure provides insights into the potential impact on earnings if these potential shares were to be converted.
+
+2. **Weighted-average Shares Used to Compute Earnings per Share**: This indicates the average number of shares that were used to calculate the basic and diluted EPS. The basic EPS calculation used 2,534 million shares, while the same figure for the preceding year (2023) was 2,568 million for basic EPS, and the current period accounts, 2,540 million shares.
+
+The data is crucial for understanding the company's profitability on a per-share basis during the second quarter of 2024 and highlights how share dilution could potentially affect earnings per share.
+
+Here is the table in markdown format:
+
+```markdown
+| Earnings per share                      | 2024  | 2023  |
+|-----------------------------------------|-------|-------|
+| Basic EPS                               | $5.31 |       |
+| Diluted EPS                             | $5.16 |       |
+| Weighted-average shares (basic, million)| 2,534 | 2,568 |
+
+```
+
+This markdown table organizes the earnings per share and the weighted-average shares efficiently, providing a clear view of the financial metrics related to sharholders' interests in the second quarter of 2024.
+### Comprehensive Description
+
+The table provides a detailed snapshot of Meta Platforms, Inc.'s financial position as of June 30, 2024, compared to December 31, 2023. This condensed consolidated balance sheet outlines various asset categories alongside liabilities and stockholders' equity, revealing the company's financial health at these two points in time.
+
+#### Assets
+
+1. **Current Assets:**
+   - **Cash and Cash Equivalents:** A decrease from $41,862 million in December 2023 to $32,045 million in June 2024, indicating reduced liquidity.
+   - **Marketable Securities:** Increased to $26,035 million from $23,541 million, showing higher short-term investments.
+   - **Accounts Receivable, Net:** A decrease, reflecting a drop from $16,169 million to $14,505 million, which might suggest better collection or reduced sales on credit.
+   - **Prepaid Expenses and Other Current Assets:** Slight increase, ending at $3,846 million from $3,793 million.
+   - **Total Current Assets:** Decreased from $85,365 million to $76,431 million, suggesting a reduction in readily available assets.
+
+2. **Non-current Assets:**
+   - **Non-marketable Equity Securities:** Remained relatively stable, with a slight increase to $6,207 million.
+   - **Property and Equipment, Net:** Significant increase to $102,959 million from $96,587 million, suggesting capital investments.
+   - **Operating Lease Right-of-Use Assets:** Increased slightly to $14,058 million.
+   - **Goodwill:** Constant at $20,654 million, reflecting the value of acquired business units.
+   - **Other Assets:** Increased to $9,929 million from $7,582 million, indicating potential growth or new investments.
+   - **Total Assets:** A small increase from $229,623 million to $230,238 million, showing slight overall asset growth.
+
+#### Liabilities and Stockholders' Equity
+
+1. **Current Liabilities:**
+   - **Accounts Payable:** Decreased from $4,849 million to $3,173 million, suggesting that less is owed to suppliers.
+   - **Operating Lease Liabilities, Current:** Slight increase to $1,917 million.
+   - **Accrued Expenses and Other Current Liabilities:** Decreased to $21,914 million from $25,488 million, perhaps reflecting payment of expenses or liabilities.
+   - **Total Current Liabilities:** Decreased substantially, indicating a reduction in short-term obligations.
+
+2. **Non-current Liabilities:**
+   - **Operating Lease Liabilities, Non-current:** Marginal increase to $17,685 million.
+   - **Long-term Debt:** Rose slightly to $18,389 million.
+   - **Long-term Income Taxes:** Increased to $7,897 million.
+   - **Other Liabilities:** Notable increase to $2,500 million from $1,370 million.
+   - **Total Liabilities:** Decreased slightly to $73,475 million, indicating reduced obligations.
+
+3. **Stockholders' Equity:**
+   - **Common Stock and Additional Paid-in Capital:** Increased to $78,270 million, suggesting new stock issuances or capital infusions.
+   - **Accumulated Other Comprehensive Loss:** Widened slightly to $(2,695) million, indicating possible unrealized losses.
+   - **Retained Earnings:** Decreased to $81,188 million, which might imply dividend payouts or other distributions.
+   - **Total Stockholders' Equity:** Rose to $156,763 million, reflecting a stronger equity position.
+
+#### Overall Summary
+
+The table reflects Meta's financial activities over the half-year, with investments in property and equipment alongside fluctuations in liabilities and equity positions. Despite lower cash reserves, the company shows an increase in equity and capacity for operations through new and strategic investments.
+
+### Table in Markdown Format
+
+```markdown
+### Meta Platforms, Inc. Condensed Consolidated Balance Sheets (In Millions)
+
+| Assets                                 | June 30, 2024 | December 31, 2023 |
+|----------------------------------------|---------------|-------------------|
+| **Current Assets:**                    |               |                   |
+| Cash and cash equivalents              | $32,045       | $41,862           |
+| Marketable securities                  | $26,035       | $23,541           |
+| Accounts receivable, net               | $14,505       | $16,169           |
+| Prepaid expenses and other current assets | $3,846     | $3,793            |
+| **Total current assets**               | **$76,431**   | **$85,365**       |
+| **Non-current Assets:**                |               |                   |
+| Non-marketable equity securities       | $6,207        | $6,141            |
+| Property and equipment, net            | $102,959      | $96,587           |
+| Operating lease right-of-use assets    | $14,058       | $13,294           |
+| Goodwill                               | $20,654       | $20,654           |
+| Other assets                           | $9,929        | $7,582            |
+| **Total assets**                       | **$230,238**  | **$229,623**      |
+
+| Liabilities and Stockholders' Equity    | June 30, 2024 | December 31, 2023 |
+|-----------------------------------------|---------------|-------------------|
+| **Current Liabilities:**                |               |                   |
+| Accounts payable                        | $3,173        | $4,849            |
+| Operating lease liabilities, current    | $1,917        | $1,623            |
+| Accrued expenses and other current liabilities | $21,914 | $25,488           |
+| **Total current liabilities**           | **$27,004**   | **$31,960**       |
+| **Non-current Liabilities:**            |               |                   |
+| Operating lease liabilities, non-current | $17,685      | $17,226           |
+| Long-term debt                          | $18,389       | $18,385           |
+| Long-term income taxes                  | $7,897        | $7,514            |
+| Other liabilities                       | $2,500        | $1,370            |
+| **Total liabilities**                   | **$73,475**   | **$76,455**       |
+| **Stockholders' Equity:**               |               |                   |
+| Common stock and additional paid-in capital | $78,270   | $73,253           |
+| Accumulated other comprehensive loss    | $(2,695)      | $(2,155)          |
+| Retained earnings                       | $81,188       | $82,070           |
+| **Total stockholders' equity**            | **$156,763**  | **$153,168**      |
+| **Total liabilities and stockholders' equity** | **$230,238**  | **$229,623**     |
+```
+
+### Comprehensive Description of the Table
+
+The table below represents a section of Meta Platforms, Inc.'s financial results as reported for the second quarter ending June 30, 2024. This snippet specifically focuses on the balance of stockholders' equity from the company's condensed consolidated balance sheets. Here's what the table contains:
+
+- **Accumulated Other Comprehensive Loss**: This column represents the losses on investments and pension liabilities that are not reported on the income statement though they affect equity.
+- **Retained Earnings**: This reflects the net income that the company has retained, rather than distributed as dividends to shareholders.
+- **Total Stockholders' Equity**: Total equity attributable to shareholders after accounting for share capital and retained earnings.
+- **Total Assets**: This is the consolidation of all the resources owned by Meta Platforms, Inc.
+
+The figures are presented for two different dates: June 30, 2024, and December 31, 2023, for comparative purposes. This provides insight into the company's financial standing and equity changes over time.
+
+### Table in Markdown Format
+
+```markdown
+|                        | June 30, 2024  | December 31, 2023 |
+|------------------------|---------------|-------------------|
+| **Accumulated Other Comprehensive Loss** | (2,695)         | (2,155)             |
+| **Retained Earnings**  | 81,188        | 82,070           |
+| **Total Stockholders' Equity** | 156,763        | 153,168           |
+| **Total Assets**       | $230,238      | $229,623         |
+```
+
+This markdown table effectively summarizes the equity section changes of Meta Platforms, Inc.'s financial results for the given period.
+### Description of the Table
+
+The table provided is a segment of Meta Platforms, Inc.'s condensed consolidated statement of cash flows (unaudited), detailing the cash flow activities for Meta in both the three and six months ended June 30, 2024, compared to the corresponding periods in 2023. The table delineates the cash inflows and outflows across three primary activities: operating, investing, and financing, including detailed line items for specific components within each category.
+
+**1. Operating Activities:**
+   - This section begins with net income, a clear indicator of profitability. Several adjustments related to non-cash items and changes in working capital are then added back or subtracted. These include depreciation and amortization, share-based compensation, deferred income taxes, impairment charges, and other minor adjustments. Changes in assets and liabilities such as accounts receivable, prepaid expenses, accounts payable, and accrued expenses are also adjusted to reconcile to net cash provided by operating activities.
+
+**2. Investing Activities:**
+   - The table outlines the purchase of property and equipment, highlight sales and maturities of marketable debt securities, and account for acquisitions of businesses and other intangible assets, net of any sales. The net effect of these activities results in net cash used in investing activities.
+
+**3. Financing Activities:**
+   - This section includes cash flows from activities such as taxes paid associated with net share settlements, repurchases of Class A common stock, dividend payments, proceeds from long-term debt, and principal payments on finance leases. The net effect of these activities is net cash used in financing activities.
+
+Finally, the table shows the effect of exchange rate changes on cash and the net increase or decrease in cash, cash equivalents, and restricted cash over the periods. It concludes with the cash balance at the beginning and end of the period.
+
+### Markdown Table
+
+```markdown
+## Meta Platforms, Inc.
+### Condensed Consolidated Statements of Cash Flows
+#### (In millions, Unaudited)
+
+|                                | Three Months Ended June 30, | Six Months Ended June 30,  |
+|--------------------------------|-----------------------------|----------------------------|
+|                                | 2024      | 2023      | 2024       | 2023     |
+| **Cash flows from operating activities** |  |  |  |  |
+| Net income                     | $13,465   | $7,788    | $25,834    |          |
+| Adjustments to reconcile net income to net cash provided by operating activities: |  |  |  |  |
+| Depreciation and amortization  | 3,637     | 2,623     | 7,011      |          |
+| Share-based compensation       | 4,616     | 4,060     | 8,178      |          |
+| Deferred income taxes          | (1,643)   | (1,137)   | (2,098)    |          |
+| Impairment charges for facilities consolidation, net | 41        | 232       | 280        |          |
+| Other                          | (6)       | 212       | (71)       |          |
+| Changes in assets and liabilities: |  |  |  |  |
+| Accounts receivable            | (1,171)   | (1,424)   | 1,350      |          |
+| Prepaid expenses and other current assets | (84)      | (54)      | 16         |          |
+| Other assets                   | 54        | 37        | (41)       |          |
+| Accounts payable               | 250       | (51)      | (862)      |          |
+| Accrued expenses and other current liabilities | (497)    | 5,174     | (1,771)    |          |
+| Other liabilities              | 708       | (151)     | 790        |          |
+| **Net cash provided by operating activities** | 19,370    | 17,309    | 38,616     |          |
+| **Cash flows from investing activities** |  |  |  |  |
+| Purchases of property and equipment, net | (8,173)   | (6,134)   | (14,573)   |          |
+| Purchases of marketable debt securities | (3,289)   | (717)     | (10,176)   |          |
+| Sales and maturities of marketable debt securities | 3,233     | 1,816     | 7,858      |          |
+| Acquisitions of businesses and intangible assets | (57)       | (83)      | (129)      |          |
+| Other investing activities     | (12)      | (85)      | (12)       |          |
+| **Net cash used in investing activities** | (8,298)   | (5,203)   | (17,032)   |          |
+| **Cash flows from financing activities** |  |  |  |  |
+| Taxes paid related to net share settlement of equity awards | (3,208)   | (1,692)   | (6,370)    |          |
+| Repurchases of Class A common stock | (6,299)   | (898)     | (21,307)   |          |
+| Dividend payments              | (1,266)   | —         | (2,539)    |          |
+| Proceeds from issuance of long-term debt, net | —         | 8,455     | —          |          |
+| Principal payments on finance leases | (299)     | (220)     | (614)      |          |
+| Other financing activities     | (106)     | (353)     | (115)      |          |
+| **Net cash provided by (used in) financing activities** | (11,178)  | 5,292     | (30,945)   |          |
+| Effect of exchange rate changes on cash, cash equivalents, and restricted cash | (152)     | (14)      | (440)      |          |
+| **Net increase (decrease) in cash, cash equivalents, and restricted cash** | (258)     | 17,384    | (9,801)    |          |
+| Cash, cash equivalents, and restricted cash at beginning of the period | 33,284    | 12,420    | 42,827     |          |
+```
+
+This table captures the company's financial activity over the specified periods, providing insight into their operating efficiency, investment expenditure, and financing strategy.
+Here's a detailed description of the table and its presentation in markdown format:
+
+### Table Description
+
+The table is a segment from the condensed consolidated balance sheets of Meta Platforms, Inc., detailing the company's cash resources. The data is presented for two time periods: June 30, 2024, and June 30, 2023. It lists the dollar values in millions for "Cash and cash equivalents," "Restricted cash, included in prepaid expenses and other current assets," and "Restricted cash, included in other assets." The table then calculates the "Total cash, cash equivalents, and restricted cash" by summing the relevant subcategories for each of the specified periods. 
+
+- **Cash and Cash Equivalents:** Represents the amount of highly liquid cash and investments held by the company, which are easily convertible to known amounts of cash.
+- **Restricted Cash:** Divided into two categories:
+  - **Included in Prepaid Expenses and Other Current Assets:** This refers to cash which is restricted by contractual obligations that might include items expected to be settled in the near-term.
+  - **Included in Other Assets:** This accounts for cash that is restricted due to longer-term obligations.
+- **Total Cash, Cash Equivalents, and Restricted Cash:** This is the sum total of all the cash resources, both unrestricted and restricted, that the company has at its disposal.
+
+### Table in Markdown Format
+
+```markdown
+| Description                                               | June 30, 2024 | June 30, 2023 | June 30, 2024 |
+|-----------------------------------------------------------|---------------|---------------|---------------|
+| Cash and cash equivalents                                 | $32,045       | $28,785       | $32,045       |
+| Restricted cash, included in prepaid expenses and other current assets | $100          | $165          | $100          |
+| Restricted cash, included in other assets                 | $881          | $854          | $881          |
+| **Total cash, cash equivalents, and restricted cash**     | **$33,026**   | **$29,804**   | **$33,026**   |
+```
+
+This representation provides an overview of the company's liquidity position through its cash and cash equivalents both unrestricted and restricted for different financial operations or obligations.
+The table provided is a snippet of Meta Platforms, Inc.'s financial report, specifically focusing on the supplemental cash flow data for the second quarter of 2024 compared to the same period in 2023. This data is crucial for understanding the company's cash flow dynamics and its investment and financing activities.
+
+Here's a detailed breakdown of the table contents:
+
+1. **Cash Paid for Income Taxes, Net**: This figure represents the total cash Meta paid for income taxes during the reported periods. For the three months ended June 30, 2024, Meta paid $5,929 million, a significant increase from $1,102 million in 2023. Similarly, for the six months ended June 30, 2024, cash paid for income taxes was $6,559 million, highlighting the company's tax obligations.
+
+2. **Cash Paid for Interest, Net of Amounts Capitalized**: This entry details the interest Meta paid, excluding capitalized interest. In the three months ended June 30, 2024, Meta paid $124 million. No interest was paid in the same period in 2023. For the six months ended June 30, 2024, the company paid $245 million, compared to $182 million in 2023 when considering capitalized amounts.
+
+3. **Non-cash Investing and Financing Activities**: 
+   - **Property and Equipment in Accounts Payable and Accrued Expenses and Other Current Liabilities**: For the three months and six months ended June 30, 2024, Meta reported $3,229 million in liabilities for property and equipment acquisitions, a decrease from $3,845 million in 2023. 
+   
+   - **Acquisition of Businesses and Intangible Assets in Accrued Expenses and Other Current Liabilities and Other Liabilities**: This figure indicates the non-cash portion related to the acquisition of businesses and intangible assets. Meta reported $267 million for the three and six months ended June 30, 2024, compared to $217 million in 2023.
+
+The table provides an insight into Meta's cash flow situation, tax payments, interest handling, and non-cash transactions pertaining to investments and acquisitions, reflecting strategies in managing liquidity and financial obligations.
+
+Here is the table in markdown format:
+
+```markdown
+| Supplemental Cash Flow Data                              | Three Months Ended June 30,  | Six Months Ended June 30,   |
+|----------------------------------------------------------|-----------------------------|-----------------------------|
+|                                                          | 2024          | 2023       | 2024           | 2023      |
+| **Cash paid for income taxes, net**                      | $5,929        | $1,102     | $6,559         | -         |
+| **Cash paid for interest, net of amounts capitalized**   | $124          | $0         | $245           | -         |
+| **Non-cash investing and financing activities:**         |               |            |                |           |
+| Property and equipment in accounts payable and            |               |            |                |           |
+| accrued expenses and other current liabilities           | $3,229        | $3,845     | $3,229         | -         |
+| Acquisition of businesses and intangible assets in       |               |            |                |           |
+| accrued expenses and other current liabilities and       |               |            |                |           |
+| other liabilities                                        | $267          | $217       | $267           | -         |
+```
+
+Note: The "-" in the 2023 columns for the six months ended entries are indicative of the data being absent for this period in the supplemental cash flow data segment.
+### Comprehensive Description of the Table
+
+The table presents the segment results for Meta Platforms, Inc. for the three and six months ending June 30, 2024, and June 30, 2023. It delineates the company's revenue and income from operations across two distinct segments: "Family of Apps" and "Reality Labs." 
+
+- **Revenue**: The revenue is parsed into "Advertising" and "Other revenue," further categorized under the "Family of Apps" and "Reality Labs" segments. 
+  - For the three months ending June 30, 2024, Meta reported total revenue of $39.071 billion, an increase from $31.999 billion in the same period in 2023. 
+  - The "Family of Apps" contributed significantly to the revenue, generating $38.718 billion in 2024 compared to $31.723 billion in 2023.
+  - "Reality Labs" revenue was $353 million for the three months ended June 30, 2024, up from $276 million in the previous year.
+
+- **Income (Loss) from Operations**: The income statement segment splits the operational income (or loss) between the "Family of Apps" and "Reality Labs."
+  - "Family of Apps" showcased a profitable figure, with an income of $19.335 billion in 2024, up from $13.131 billion in 2023 for the three-month period.
+  - Conversely, "Reality Labs" recorded operational losses of $4.488 billion in 2024, compared to a loss of $3.739 billion in 2023.
+  - Consequently, the total income from operations amounted to $14.847 billion for the three months ending June 30, 2024, a substantial increase from $9.392 billion in 2023.
+
+The table provides insight into how Meta's business divisions contribute to overall financial performance, with the "Family of Apps" being the major revenue driver, while "Reality Labs" is focused on growth with current operational losses.
+
+### Table in Markdown Format
+
+```markdown
+**Meta Platforms, Inc. Segment Results**
+
+| Segment        | Revenue (3 months) | Revenue (6 months) | Income (Loss) from Operations (3 months) | Income (Loss) from Operations (6 months) |
+|----------------|--------------------|--------------------|----------------------------------------|------------------------------------------|
+|                | 2024     | 2023     | 2024     | 2023     | 2024     | 2023     | 2024     | 2023     |
+| Advertising    | $38,329  | $31,498  | $73,965  | $59,599  |              -               |             -                |
+| Other revenue  | $389     | $225     | $769     | $430     |              -               |             -                |
+| Family of Apps | $38,718  | $31,723  | $74,734  | $60,029  | $19,335   | $13,131  |
+| Reality Labs   | $353     | $276     | $793     | $616     | $(4,488)  | $(3,739) |
+| **Total**      | **$39,071** | **$31,999** | **$75,527** | **$60,645** | **$14,847**  | **$9,392**  | **$28,665** | **$16,619** |
+
+- Net income represents profit after all expenses, including taxes and operating costs, emphasizing segment profitability.
+```
+
+This table structure provides a clear breakdown of the revenue and operational outcomes for Meta's two primary business areas over a comparable period from the previous year.
+### Detailed Description of the Table
+
+The table provides a financial overview of Meta Platforms, Inc.'s performance for the second quarter ending June 30, 2024, compared to the same period in 2023. Key metrics include revenue figures adjusted for foreign exchange effects, advertising revenue, and cash flow details. The data underscores Meta's financial growth, showing significant year-over-year percentage changes in revenue and advertising revenue. It also includes details on capital expenditures, specifically purchases of property and equipment, and payments on finance leases, providing a comprehensive snapshot of both revenue generation and cash outflow.
+
+#### Key Components of the Table:
+
+1. **Revenue and Advertising Revenue:**
+   - GAAP revenue for the quarter of $39.071 billion in 2024 and $31.999 billion in 2023.
+   - The foreign exchange effect on 2024 revenue is illustrated to reflect what revenue would be using 2023 rates, adjusting it to $39.442 billion.
+   - GAAP advertising revenue for the quarter of $38.329 billion in 2024 and $31.498 billion in 2023, with adjustments for foreign exchange effect bringing it to $38.696 billion in 2024.
+
+2. **Year-over-Year Changes:**
+   - A 22% increase in GAAP revenue from 2023 to 2024.
+   - Revenue excluding foreign exchange effect shows a 23% increase.
+   - Advertising revenue increased by 22%, or 23% if adjusted for the foreign exchange effect.
+  
+3. **Cash Flow:**
+   - Net cash provided by operating activities was $19.370 billion in 2024 and $17.309 billion in 2023.
+   - Purchases of property and equipment, net amounted to $8.173 billion, and principal payments on finance leases were $299 million in 2024.
+   - Free cash flow for 2024 was $10.898 billion compared to $10.955 billion in 2023.
+
+This financial data offers insight into the growth and financial health of Meta during the specified period, reflecting strong operational performance and investment in property and equipment.
+
+### Table in Markdown Format
+
+```markdown
+| Description                                                       | Q2 2024 ($ Mil) | Q2 2023 ($ Mil) |
+|-------------------------------------------------------------------|-----------------|-----------------|
+| **GAAP Revenue**                                                  | 39,071          | 31,999          |
+| Foreign Exchange Effect on 2024 Revenue Using 2023 Rates          | 371             | -               |
+| Revenue Excluding Foreign Exchange Effect                        | 39,442          | -               |
+| **GAAP Revenue Year-over-Year Change (%)**                        | 22%             | -               |
+| Revenue Excluding Foreign Exchange Effect Year-over-Year Change (%)| 23%             | -               |
+| **GAAP Advertising Revenue**                                      | 38,329          | 31,498          |
+| Foreign Exchange Effect on 2024 Advertising Revenue Using 2023 Rates| 367             | -               |
+| Advertising Revenue Excluding Foreign Exchange Effect            | 38,696          | -               |
+| **GAAP Advertising Revenue Year-over-Year Change (%)**            | 22%             | -               |
+| Advertising Revenue Excluding Foreign Exchange Effect Year-over-Year Change (%)| 23%             | -               |
+| **Net Cash Provided by Operating Activities**                     | 19,370          | 17,309          |
+| Purchases of Property and Equipment, Net                          | (8,173)         | (6,134)         |
+| Principal Payments on Finance Leases                              | (299)           | (220)           |
+| **Free Cash Flow**                                                | 10,898          | 10,955          |
+```
+
+This markdown table succinctly represents the financial highlights of Meta Platforms, Inc. for the referenced periods, facilitating an easy comparison of key financial metrics.
+This markdown table provides a concise presentation of the financial data, making it easy to read and comprehend in a digital format.
+
+Detailed Description of the Table
+The table presents segment information from Meta Platforms, Inc. for both revenue and income (loss) from operations. The data is organized into two main sections:
+
+Revenue: This section is subdivided into two categories: "Advertising" and "Other revenue". The total revenue generated from these subcategories is then summed up for two segments: "Family of Apps" and "Reality Labs". The table provides the revenue figures for three months and six months ended June 30, for the years 2024 and 2023.
+Income (loss) from operations: This section shows the income or loss from operations for the "Family of Apps" and "Reality Labs" segments, again for the same time periods.
+The table allows for a comparison between the two segments of Meta's business over time, illustrating the performance of each segment in terms of revenue and operational income or loss.
+
+The Table in Markdown Format
+### Segment Information (In millions, Unaudited)
+
+|                            | Three Months Ended June 30, 2024 | Three Months Ended June 30, 2023 | Six Months Ended June 30, 2024 | Six Months Ended June 30, 2023 |
+|----------------------------|----------------------------------|----------------------------------|------------------------------- |-------------------------------|
+| **Revenue:**               |                                  |                                  |                               |                               |
+| Advertising                | $38,329                          | $31,498                          | $73,965                       | $59,599                       |
+| Other revenue              | $389                             | $225                             | $769                          | $430                          |
+| **Family of Apps**         | $38,718                          | $31,723                          | $74,734                       | $60,029                       |
+| Reality Labs               | $353                             | $276                             | $793                          | $616                          |
+| **Total revenue**          | $39,071                          | $31,999                          | $75,527                       | $60,645                       |
+|                            |                                  |                                  |                               |                               |
+| **Income (loss) from operations:** |                                  |                                  |                               |                               |
+| Family of Apps             | $19,335                          | $13,131                          | $36,999                       | $24,351                       |
+| Reality Labs               | $(4,488)                         | $(3,739)                         | $(8,334)                      | $(7,732)                      |
+| **Total income from operations** | $14,847                          | $9,392                           | $28,665                       | $16,619                       |

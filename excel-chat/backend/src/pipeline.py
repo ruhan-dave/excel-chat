@@ -19,6 +19,7 @@ from pydantic_ai.tools import ToolDefinition
 from llama_index.core.prompts import PromptTemplate
 
 from sheet_metadata import SheetMeta
+from guardrails import GUARDRAIL_SYSTEM_PROMPT, inject_disclaimer
 
 
 # ============================================================================
@@ -209,6 +210,31 @@ class QueryPlan(BaseModel):
         default=None,
         description="Description of advice needed for 'give_advice' tasks.",
     )
+
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _parse_plan(cls, v):
+        if isinstance(v, list):
+            converted = {}
+            for i, item in enumerate(v, 1):
+                if isinstance(item, dict):
+                    if "step" in item and isinstance(item["step"], dict):
+                        converted[f"step{i}"] = item["step"]
+                    else:
+                        converted[f"step{i}"] = item
+                else:
+                    converted[f"step{i}"] = item
+            return converted
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, dict):
+                    return parsed
+                if isinstance(parsed, list):
+                    return cls._parse_plan(parsed)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return v
 
     @field_validator("items", mode="before")
     @classmethod
@@ -747,6 +773,7 @@ def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Sheet
     step4: compute ["Calculate the compound annual growth rate of Revenue from 2021 to 2023, then multiply by the 2023 profit margin (Revenue - Expenses) / Revenue"]
 
     Always use exact field names and years from the available lists.
+    {GUARDRAIL_SYSTEM_PROMPT}
     """
 
     return Agent(
@@ -754,7 +781,7 @@ def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Sheet
         result_type=QueryPlan,
         system_prompt=instructions,
         model_settings={"temperature": 0.1},
-        result_retries=3,
+        result_retries=2,
     )
 
 
@@ -800,8 +827,23 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
        percentage_change, difference): either compute directly in Python or use execute_python_code
     3. For compute steps: call execute_python_code with Python code that performs the full
        calculation using the retrieved values as literal numbers
-    4. Return the final answer as structured data, including a friendly_response field
-       with a clear, natural language answer to the user's question.
+    4. Return the final answer as structured data.
+
+    ### CRITICAL — step_results MUST be populated:
+    The `step_results` field in your output MUST contain an entry for EVERY step in the plan,
+    including pre-populated steps. For each step key (e.g. "step1", "step2"), set its value
+    to the result of that step. For retrieve/retrieve_batch steps, use the retrieved value(s).
+    For named operations and compute steps, use the computed result.
+    Example: if the plan has step1 (retrieve_batch), step2 (retrieve_batch), step3 (compute),
+    then step_results should be: {{"step1": {{...}}, "step2": {{...}}, "step3": <computed_value>}}.
+    Do NOT leave step_results as an empty dict {{}}.
+
+    ### CRITICAL — friendly_response MUST use actual field names:
+    When writing the `friendly_response` field, ALWAYS refer to the actual field names from
+    the plan — never use generic phrases like "the first series" or "the second value".
+    For example, instead of "The first benefit series grew at 25.4%", write
+    "Social security benefits grew at a CAGR of 25.4%".
+    The field names are provided in the execution prompt alongside each step.
 
     When retrieve returns multiple values (from searching all sheets), parse them carefully.
     The format is "SheetName: value; SheetName2: value2".
@@ -812,6 +854,7 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
     - Example: code = 'revenue = 1500000\\nexpenses = 800000\\nmargin = (revenue - expenses) / revenue * 100\\nreturn margin'
 
     If a retrieval fails, note it and continue with what you can.
+    {GUARDRAIL_SYSTEM_PROMPT}
     """
 
     return Agent(
@@ -826,7 +869,7 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
             execute_python_code,
         ],
         model_settings={"temperature": 0.1},
-        result_retries=3,
+        result_retries=2,
     )
 
 
@@ -837,12 +880,13 @@ def build_responder_agent() -> Agent[None, str]:
     return Agent(
         model,
         result_type=str,
-        system_prompt="""You are a helpful financial assistant.
+        system_prompt=f"""You are a helpful financial assistant.
 
         Given a user's question and the calculated results, provide a clear, conversational
         response that directly answers the question. Include specific numerical values
         with proper formatting (currency, percentages). Briefly explain how the answer
         was derived. Use a friendly, professional tone.
+        {GUARDRAIL_SYSTEM_PROMPT}
         """,
         model_settings={"temperature": 0.3},
     )
@@ -1104,7 +1148,7 @@ def build_query_pipeline(
                 cache_step_results(user_id, plan, execution)
             except Exception as e:
                 print(f"⚠️ Post-execution caching failed: {e}")
-            friendly = _format_simple_response(query, plan, execution) or ""
+            friendly = inject_disclaimer(_format_simple_response(query, plan, execution) or "")
             if friendly:
                 print(f"📝 Response: {friendly[:100]}...")
             _emit("friendly", {"response": friendly})
@@ -1129,17 +1173,29 @@ def build_query_pipeline(
             retrieve_steps = []
             named_steps = []
             compute_desc = ""
+            # Build a step-to-field-name mapping so the executor knows which
+            # field each step refers to (for use in friendly_response).
+            step_field_map: list[str] = []
             for name, step in plan.plan.items():
                 if step.action in {"retrieve", "retrieve_batch"}:
+                    # Extract field name from args for context
+                    if step.action == "retrieve_batch":
+                        if _looks_like_year(step.args[1] if len(step.args) > 1 else ""):
+                            field_name = step.args[0] if step.args else ""
+                        else:
+                            field_name = step.args[1] if len(step.args) > 1 else ""
+                    else:
+                        field_name = step.args[0] if step.args else ""
+                    step_field_map.append(f"  {name} → field: {field_name}")
                     # If we already pre-populated this step, tell the executor
                     # to use the literal value instead of re-fetching.
                     if name in pre_populated:
                         retrieve_steps.append(
-                            f"  {name}: ALREADY DONE — value is {pre_populated[name]}"
+                            f"  {name} (field: {field_name}): ALREADY DONE — value is {pre_populated[name]}"
                         )
                     else:
                         verb = "retrieve_batch" if step.action == "retrieve_batch" else "retrieve"
-                        retrieve_steps.append(f"  {name}: {verb}({step.args})")
+                        retrieve_steps.append(f"  {name} (field: {field_name}): {verb}({step.args})")
                 elif step.action == "compute":
                     compute_desc = step.args[0] if step.args else ""
                 elif step.action in NAMED_OPERATIONS:
@@ -1156,6 +1212,12 @@ def build_query_pipeline(
                 parts.append(f"Apply these named operations:\n{named_desc}")
             if compute_desc:
                 parts.append(f"Then use execute_python_code to calculate: {compute_desc}")
+            # Include step-to-field mapping so executor can name fields in friendly_response
+            if step_field_map:
+                parts.append(
+                    "Step-to-field mapping (use these field names in your friendly_response):\n"
+                    + "\n".join(step_field_map)
+                )
             parts.append(f"User query: {query}")
             exec_prompt = "\n\n".join(parts)
         else:
@@ -1175,7 +1237,9 @@ def build_query_pipeline(
             print(f"⚠️ Post-execution caching failed: {e}")
 
         # Step 3: Use executor's friendly_response (merged responder)
-        friendly = execution.friendly_response or _format_simple_response(query, plan, execution) or ""
+        friendly = inject_disclaimer(
+            execution.friendly_response or _format_simple_response(query, plan, execution) or ""
+        )
         if friendly:
             print(f"📝 Response: {friendly[:100]}...")
         else:
@@ -1209,7 +1273,7 @@ async def generate_user_friendly_response(
 
     Provide a clear, natural language response."""
     result = await responder.run(prompt)
-    return result.data
+    return inject_disclaimer(result.data)
 
 
 # ============================================================================

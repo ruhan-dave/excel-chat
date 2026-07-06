@@ -38,6 +38,8 @@ from guardrails import (
     screen_query,
     inject_disclaimer,
     check_data_sensitivity,
+    detect_sensitive_data_in_dataframe,
+    sanitize_dataframe,
     ACCEPTED_EXTENSIONS,
     MAX_FILE_SIZE_BYTES,
     MAX_SPREADSHEET_ROWS,
@@ -159,9 +161,143 @@ async def create_upload_file(
         print(f"🚫 Upload rejected: {upload_check.reason}")
         return JSONResponse(content=upload_check.reject_dict(), status_code=400)
 
-    # Generate IDs
+    # Load sheets to check row count and scan for sensitive data
+    try:
+        from excelservices import ExcelService as _ES
+        raw_sheets = _ES.load_all_sheets(filepath)
+    except Exception as e:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        return JSONResponse(content={"message": f"Failed to read file: {e}"}, status_code=400)
+
+    # Guardrail: check row count for spreadsheets
+    max_rows = max((len(df) for df in raw_sheets.values()), default=0)
+    row_check = validate_file_upload(
+        excelFile.filename, file_size=file_size, row_count=max_rows
+    )
+    if not row_check.allowed:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        print(f"🚫 Upload rejected: {row_check.reason} (max_rows={max_rows})")
+        return JSONResponse(content=row_check.reject_dict(), status_code=400)
+
+    # --- Guardrail Layer 5: Data Sensitivity Detection ---
+    all_labels: list[str] = []
+    for sheet_name, df in raw_sheets.items():
+        found, labels = detect_sensitive_data_in_dataframe(df)
+        if found:
+            all_labels.extend(labels)
+
+    if all_labels:
+        # Sensitive data detected — don't save yet. Store file temporarily
+        # and return a warning so the user can choose to sanitize or cancel.
+        pending_id = str(uuid.uuid4())
+        pending_dir = os.path.join(UPLOAD_FOLDER, "pending")
+        os.makedirs(pending_dir, exist_ok=True)
+        pending_path = os.path.join(pending_dir, f"{pending_id}_{excelFile.filename}")
+        os.rename(filepath, pending_path)
+
+        unique_labels = sorted(set(all_labels))
+        print(f"⚠️ Sensitive data detected in {excelFile.filename}: {unique_labels}")
+        return JSONResponse(
+            content={
+                "sensitive_data_detected": True,
+                "pending_upload_id": pending_id,
+                "filename": excelFile.filename,
+                "detected_types": unique_labels,
+                "message": (
+                    "This file appears to contain sensitive personal or financial data "
+                    f"({', '.join(unique_labels)}). "
+                    "You can either upload a new file without this information, "
+                    "or allow the app to automatically redact the sensitive data "
+                    "so your info stays safe while using the app."
+                ),
+            },
+            status_code=200,
+        )
+
+    # No sensitive data — proceed with normal upload
+    return await _finalize_upload(filepath, excelFile.filename, file_size, user_id)
+
+
+@app.post("/upload/confirm")
+async def confirm_upload(
+    pending_upload_id: str,
+    action: str,
+    x_user_id: str | None = Header(default=None, alias="X-User-ID"),
+):
+    """Confirm or cancel a pending upload that contained sensitive data.
+
+    Args:
+        pending_upload_id: ID returned from /upload/ when sensitive data was detected.
+        action: Either "sanitize" (redact sensitive data and proceed) or "cancel" (discard).
+    """
+    user_id = x_user_id or "anonymous"
+
+    # Find the pending file
+    pending_dir = os.path.join(UPLOAD_FOLDER, "pending")
+    pattern = os.path.join(pending_dir, f"{pending_upload_id}_*")
+    import glob
+    matches = glob.glob(pattern)
+    if not matches:
+        return JSONResponse(
+            content={"error": "Pending upload not found or expired."},
+            status_code=404,
+        )
+    pending_path = matches[0]
+    filename = os.path.basename(pending_path).split("_", 1)[1]
+
+    if action == "cancel":
+        os.remove(pending_path)
+        return {"message": "Upload cancelled. Please upload a file without sensitive data."}
+
+    if action != "sanitize":
+        os.remove(pending_path)
+        return JSONResponse(
+            content={"error": f"Invalid action '{action}'. Use 'sanitize' or 'cancel'."},
+            status_code=400,
+        )
+
+    # Sanitize: load sheets, redact sensitive data, re-save, then proceed
+    try:
+        from excelservices import ExcelService as _ES
+        raw_sheets = _ES.load_all_sheets(pending_path)
+    except Exception as e:
+        os.remove(pending_path)
+        return JSONResponse(content={"message": f"Failed to read file: {e}"}, status_code=400)
+
+    sanitized_sheets: dict[str, pd.DataFrame] = {}
+    redaction_count = 0
+    for sheet_name, df in raw_sheets.items():
+        before = df.astype(str).values.tolist()
+        df = sanitize_dataframe(df)
+        after = df.astype(str).values.tolist()
+        for r_before, r_after in zip(before, after):
+            for v_before, v_after in zip(r_before, r_after):
+                if v_before != v_after:
+                    redaction_count += 1
+        sanitized_sheets[sheet_name] = df
+
+    # Write sanitized sheets back to a new Excel file
+    sanitized_path = os.path.join(UPLOAD_FOLDER, filename)
+    with pd.ExcelWriter(sanitized_path, engine="openpyxl") as writer:
+        for sheet_name, df in sanitized_sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    # Clean up pending file
+    os.remove(pending_path)
+
+    file_size = os.path.getsize(sanitized_path)
+    print(f"🧹 Sanitized {redaction_count} cell(s) in {filename}")
+    return await _finalize_upload(sanitized_path, filename, file_size, user_id)
+
+
+async def _finalize_upload(
+    filepath: str, filename: str, file_size: int, user_id: str
+) -> dict | JSONResponse:
+    """Shared upload finalization: S3 upload, sheet metadata, DB records, cache invalidation."""
     file_id = str(uuid.uuid4())
-    s3_key = f"uploads/{file_id}/{excelFile.filename}"
+    s3_key = f"uploads/{file_id}/{filename}"
 
     # Upload to S3
     try:
@@ -169,37 +305,27 @@ async def create_upload_file(
         print(f"Uploaded to S3: {s3_key}")
     except Exception as e:
         print(f"⚠️ S3 upload failed: {e}")
+        if os.path.exists(filepath):
+            os.remove(filepath)
         return JSONResponse(content={"message": f"Upload failed: {e}"}, status_code=500)
 
     # Load all sheets and create metadata
     try:
-        sheet_metas = ExcelService.load_sheet_metadata_from_file(filepath, file_id, excelFile.filename, s3_key)
-        print(f"Found {len(sheet_metas)} sheets in {excelFile.filename}")
-
-        # Guardrail: check row count for spreadsheets
-        max_rows = max((m.row_count for m in sheet_metas), default=0)
-        row_check = validate_file_upload(
-            excelFile.filename, file_size=file_size, row_count=max_rows
-        )
-        if not row_check.allowed:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            print(f"🚫 Upload rejected: {row_check.reason} (max_rows={max_rows})")
-            return JSONResponse(content=row_check.reject_dict(), status_code=400)
+        sheet_metas = ExcelService.load_sheet_metadata_from_file(filepath, file_id, filename, s3_key)
+        print(f"Found {len(sheet_metas)} sheets in {filename}")
 
         # Detect schema groups
         ExcelService.detect_schema_groups(sheet_metas)
         print(f"Schema groups: {set(m.schema_group for m in sheet_metas)}")
 
         # Save file record
-        save_file(file_id, excelFile.filename, s3_key, len(sheet_metas), user_id=user_id)
+        save_file(file_id, filename, s3_key, len(sheet_metas), user_id=user_id)
 
         # Save each sheet metadata
         for meta in sheet_metas:
             save_sheet(meta, user_id=user_id)
 
-        # Auto-describe all sheets via LLM (async, non-blocking for response)
-        # We do this synchronously for now so descriptions are ready immediately
+        # Auto-describe all sheets via LLM
         try:
             ExcelService.auto_describe_all_sheets(sheet_metas)
         except Exception as e:
@@ -211,12 +337,10 @@ async def create_upload_file(
         traceback.print_exc()
         return JSONResponse(content={"message": f"File uploaded but sheet processing failed: {e}"}, status_code=500)
     finally:
-        # Clean up local file
         if os.path.exists(filepath):
             os.remove(filepath)
 
-    # Invalidate the user's semantic cache: their previously-cached answers
-    # are about different data now.
+    # Invalidate the user's semantic cache
     try:
         semantic_invalidate_user_cache(user_id)
     except Exception as e:

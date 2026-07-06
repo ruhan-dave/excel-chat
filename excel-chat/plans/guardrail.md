@@ -9,11 +9,12 @@
 ### Accepted File Formats
 - PDF
 - XLSX
+- XLS
 - CSV
 - TXT
 
 **Rejection Message:**
-> Please upload a file in one of the following formats: PDF, XLSX, CSV, or TXT.
+> Please upload a file in one of the following formats: PDF, XLSX, XLS, CSV, or TXT.
 
 ### File Size & Complexity Limits
 - Maximum **50 pages** (for PDFs)

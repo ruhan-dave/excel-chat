@@ -5,7 +5,7 @@
 | Tier | Technology | Location | Purpose |
 |------|-----------|----------|---------|
 | File storage | AWS S3 (`ragsheets`) | Cloud | Uploaded Excel files (auto-expire 90 days) |
-| Metadata + cache | SQLite (`backend/src/sheets.db`) | Local disk | Sheet metadata, descriptions, LLM response cache |
+| Metadata + cache | SQLite (`backend/src/sheets.db`) | Container filesystem (Railway) | Sheet metadata, descriptions, LLM response cache, result cache, threads/messages |
 | Embeddings (legacy) | ChromaDB (`./db/`) | Local disk | TF-IDF embeddings — **disabled, code commented out** |
 
 ### What's Stored Where
@@ -1076,6 +1076,47 @@ With intermediate result caching:
 
 ## Redis: Architecture & Dual-Write Strategy
 
+### The 5 Redis Caching Types
+
+Redis serves as an in-memory acceleration layer on top of SQLite (which remains the durable source of truth). Every cache write goes to **both** Redis and SQLite (dual-write). Every read hits Redis first; on miss, falls through to SQLite. If Redis goes down, everything still works via SQLite — just slower.
+
+| # | Cache Type | Redis Namespace | What It Caches | Key Format | Redis Ops | File | Benefit |
+|---|-----------|----------------|----------------|------------|-----------|------|---------|
+| 1 | **Exact-match LLM** | `llm:` | Sheet auto-description LLM responses | `llm:{sha256(model:prompt)}` | `GET`, `SETEX`, `INCR`, `EXPIRE` | `cache_service.py` | Re-upload same sheet → skip LLM call (~0.1ms vs ~2-5s) |
+| 2 | **Semantic** | `semantic:` | Full query responses with 384-dim MiniLM embeddings for cosine similarity | `semantic:{user_id}:{hash}` (Redis hash with embedding + response) | `HSET`, `FT.SEARCH` (KNN vector search via RediSearch), `SCAN`, `DELETE` | `semantic_cache.py` | "Revenue in 2022" ≈ "2022 revenue" → skip entire pipeline (~0.1ms vs ~22s) |
+| 3 | **Retrieve result** | `result:` | Individual `df.loc[field, year]` lookups | `result:{user_id}:{field}_{year}` | `GET`, `SETEX` | `result_cache.py` | Repeated field/year retrieval → skip DataFrame scan (~0.1ms vs ~5ms) |
+| 4 | **Sandbox result** | `sandbox:` | Python sandbox execution output | `sandbox:{user_id}:{sha256(normalized_code)}` | `GET`, `SETEX` | `result_cache.py` | Same calculation re-run → skip sandbox execution (~0.1ms vs ~50ms) |
+| 5 | **Structured keys** | `result:` | Post-execution named operation results (sum, ratio, CAGR, etc.) | `result:{user_id}:{op}_{field}_{years}` (e.g., `sum_revenue_2022_2023_2024_2025`) | `GET`, `SETEX` | `result_cache.py` | Different query, same sub-computation → cached structured result |
+
+**How they fit together in a query lifecycle:**
+
+```
+User asks: "What is the ratio of revenue to grants for 2022-2025?"
+  │
+  ├─ Layer 2 (Semantic): Embed query → FT.SEARCH KNN vs past queries
+  │   HIT (cosine sim ≥ 0.88)? → Return full cached response. DONE.
+  │   MISS → continue to pipeline
+  │
+  ├─ Pipeline: Planner generates QueryPlan (retrieve Revenue × 4 years, Grants × 4 years, divide)
+  │
+  ├─ Pre-populate: retrieve_batch("Revenue", ["2022","2023","2024","2025"])
+  │   ├─ Layer 3 (Retrieve): GET result:{uid}:revenue_2022 → HIT? skip DataFrame scan
+  │   └─ Layer 3 (Retrieve): GET result:{uid}:revenue_2023 → MISS? scan + SETEX
+  │
+  ├─ Executor: generate Python code for ratio calculation
+  │   ├─ Layer 4 (Sandbox): GET sandbox:{uid}:{sha256(code)} → HIT? skip execution
+  │   └─ Layer 4 (Sandbox): MISS? run sandbox + SETEX
+  │
+  ├─ Post-execution: derive structured keys from QueryPlan
+  │   └─ Layer 5 (Structured): SETEX result:{uid}:ratio_revenue_..._grants_...
+  │
+  └─ Store full response in Layer 2 (Semantic) for future paraphrase matches
+```
+
+**Cache invalidation**: On file upload or delete, `cache_invalidate_user(user_id)` clears all per-user layers (2–5) via `SCAN` + `DELETE`. Layer 1 (global exact-match) is not user-scoped and persists. TTL: 7 days for all cache types (Redis native `SETEX`, SQLite cron fallback).
+
+**Health monitoring**: `GET /cache/stats` reports Redis connection status (`PING`), memory usage (`INFO memory`), total key count (`DBSIZE`), and key counts by namespace (`SCAN` per prefix).
+
 ### Why Redis Alongside SQLite
 
 SQLite is the **source of truth** — it survives any crash, requires no external dependency, and handles all cache lookups when Redis is unavailable. Redis is an **optional acceleration layer** that provides:
@@ -1195,4 +1236,156 @@ def _get_redis():
 - **Redis Cloud** (30MB free): Too small for production; RediSearch available but limited to paid plans at scale
 - **Google Memorystore / Azure Cache**: No free tier, per-node-hour billing (~$36/mo / ~$16/mo entry)
 - **DigitalOcean** ($15/mo): No free tier, runs Valkey (no modules)
+
+---
+
+## Metadata Persistence on Railway
+
+### The Problem
+
+SQLite (`backend/src/sheets.db`) lives in the container filesystem. On Railway, the container filesystem is **ephemeral** — every redeploy, restart, or scale event wipes it clean. This means:
+
+| Data | Stored In | Survives Container Restart? | Impact of Loss |
+|------|-----------|---------------------------|----------------|
+| Uploaded Excel files | AWS S3 | ✅ Yes (external) | None |
+| Redis cache (all 5 layers) | Upstash Redis | ✅ Yes (external) | None — cache repopulates on misses |
+| **Sheet metadata** (`files`, `sheets` tables) | SQLite | ❌ **No** | All sheet descriptions, field/year info, schema groups lost |
+| **Thread/message history** (`threads`, `thread_sheets`, `messages` tables) | SQLite | ❌ **No** | All conversation history lost |
+| **Cache tables** (`llm_cache`, `result_cache`) | SQLite | ❌ **No** | Fallback cache lost — Redis still has everything via dual-write |
+
+**The critical gap**: Metadata and conversation history are only in SQLite. Redis caches them indirectly (semantic cache has full responses), but the structured metadata (sheet descriptions, thread state, message persistence) has no external backup. A container restart = full data loss for these tables.
+
+### Option 1: Railway Volume Mount (Simplest)
+
+Railway volumes provide persistent storage that survives container restarts and redeployments.
+
+**How it works**: Mount a volume to a path (e.g., `/app/data`), move `sheets.db` there, and the file persists across deploys.
+
+| Aspect | Details |
+|--------|---------|
+| **Size limits** | Trial: 0.5GB · Hobby ($5/mo): 5GB · Pro ($20/mo): 50GB (up to 250GB self-serve) |
+| **Cost** | $0.15/GB/month (billed per-second). A 1GB volume ≈ $0.15/mo |
+| **Persistence** | Survives deploys, restarts, and scale events. Data retained 90 days after plan cancellation |
+| **Deploy behavior** | Brief downtime on redeploy (Railway prevents multiple deployments from mounting the same volume simultaneously) |
+| **Replicas** | ❌ Not supported — cannot use volumes with replicas |
+| **Live resize** | ✅ Available on Hobby and Pro plans (no downtime, unless volume is at 100% capacity) |
+
+**Pros**:
+- **Zero code changes** — just move `sheets.db` to the volume mount path and update `DB_PATH` env var
+- **Cheapest option** — $0.15/mo for 1GB, well within Hobby plan's 5GB limit
+- **No external dependencies** — everything stays on Railway
+- **SQLite performance unchanged** — local disk I/O, no network round-trip
+- **Simple to set up** — Railway dashboard UI, no migration scripts needed
+
+**Cons**:
+- **No replicas** — cannot horizontally scale the backend while using a volume
+- **Brief deploy downtime** — Railway blocks concurrent deployments on the same volume (~5-15s)
+- **Single point of failure** — if the volume corrupts, data is lost (no built-in replication)
+- **No point-in-time recovery** — cannot restore to a previous state (only manual backups)
+- **Vendor lock-in** — volume data is tied to Railway; migrating off requires manual export
+- **Single container only** — volume cannot be shared across services
+
+**Implementation**:
+```bash
+# 1. In Railway dashboard, add a volume to the backend service
+#    Mount path: /app/data
+
+# 2. Set environment variable
+DB_PATH=/app/data/sheets.db
+
+# 3. In sheet_metadata.py, use the env var
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "sheets.db"))
+```
+
+### Option 2: Migrate to Neon Postgres (Most Robust)
+
+[Neon](https://neon.com) is a serverless Postgres platform with a generous free tier.
+
+| Aspect | Details |
+|--------|---------|
+| **Free tier** | 1 project, 5GB storage, unlimited branches, 14 days continuous compute |
+| **Paid tier** | Pay-per-usage (autoscaling), ~2.4x cheaper than provisioned Postgres |
+| **Scale-to-zero** | Idle databases suspend automatically — $0 when not in use |
+| **Point-in-time restore** | Restore to any second within your history window |
+| **Connection pooling** | Handles thousands of concurrent connections |
+| **Serverless driver** | HTTP/WebSocket driver for edge/serverless environments |
+| **Branching** | Instant database copies for dev/test/CI |
+
+**Pros**:
+- **True persistence** — data survives any Railway event (restart, redeploy, cancel, migrate)
+- **Point-in-time recovery** — restore to any moment if something goes wrong
+- **Scales horizontally** — multiple backend replicas can connect to the same Postgres instance
+- **No deploy downtime** — database is external, deploys don't touch it
+- **No vendor lock-in** — standard Postgres, can migrate to any Postgres host (RDS, Supabase, etc.)
+- **Connection pooling** — built-in pooler handles concurrent connections gracefully
+- **Branching** — create test databases instantly for development
+- **Future-proof** — if the app grows beyond SQLite's limits (concurrent writes, large datasets), Postgres handles it natively
+
+**Cons**:
+- **Code changes required** — must migrate from `sqlite3` to `psycopg2`/`asyncpg` or use SQLAlchemy as an abstraction layer
+- **Schema migration** — all `CREATE TABLE` statements, CRUD functions in `sheet_metadata.py` need to be rewritten for Postgres SQL dialect (minor: `AUTOINCREMENT` → `SERIAL`, `TEXT` → `TEXT` is same, `datetime('now')` → `NOW()`)
+- **Network latency** — every query has a network round-trip (~1-10ms vs SQLite's ~0.1ms local I/O)
+- **New external dependency** — one more service to manage, monitor, and pay for beyond free tier
+- **Connection management** — need connection pooling (Neon provides this, but code must use it correctly)
+- **Migration effort** — ~200-300 lines of changes across `sheet_metadata.py`, plus testing
+
+**Implementation sketch**:
+```python
+# requirements.txt: add psycopg2-binary>=2.9 or asyncpg>=0.29
+
+# sheet_metadata.py
+import os
+import psycopg2
+from psycopg2.pool import SimpleConnectionPool
+
+_pool = None
+
+def _get_db():
+    global _pool
+    if _pool is None:
+        database_url = os.environ.get("DATABASE_URL")  # Neon connection string
+        _pool = SimpleConnectionPool(1, 10, database_url)
+    return _pool.getconn()
+
+# SQL changes:
+#   CREATE TABLE ... AUTOINCREMENT → CREATE TABLE ... SERIAL PRIMARY KEY
+#   datetime('now') → NOW()
+#   ? placeholders → %s placeholders
+#   PRAGMA statements → remove (not needed in Postgres)
+```
+
+### Option 3: Hybrid (Pragmatic Middle Ground)
+
+Keep SQLite for cache tables (`llm_cache`, `result_cache`) — since Redis (Upstash) is the primary cache and SQLite is just the fallback, losing the fallback on restart is acceptable. Move only **metadata tables** (`files`, `sheets`, `threads`, `thread_sheets`, `messages`) to Neon Postgres.
+
+**Pros**:
+- **Minimal migration** — only 5 tables to move, cache logic stays untouched
+- **Preserves SQLite speed for cache fallback** — no network latency on cache reads
+- **Metadata is safe** — the important data (sheet descriptions, conversations) is in Postgres
+- **Redis + Postgres cover everything** — no dependency on ephemeral container storage
+
+**Cons**:
+- **Two database systems** — SQLite + Postgres, increased complexity
+- **Two connection patterns** — code must handle both `sqlite3` and `psycopg2`
+- **Cache fallback still ephemeral** — SQLite cache tables still lost on restart (but Redis covers this)
+
+### Decision Matrix
+
+| Criteria | Railway Volume | Neon Postgres | Hybrid |
+|----------|---------------|---------------|--------|
+| **Implementation effort** | ~5 min (env var) | ~1-2 days (rewrite `sheet_metadata.py`) | ~4-8 hours (move 5 tables) |
+| **Cost (free tier)** | $0 (Hobby $5/mo includes 5GB) | $0 (5GB, scale-to-zero) | $0 (both free tiers) |
+| **Data persistence** | ✅ Survives restarts | ✅ Survives anything | ✅ Metadata survives, cache via Redis |
+| **Horizontal scaling** | ❌ No replicas | ✅ Multiple replicas | ✅ For metadata; cache via Redis |
+| **Point-in-time recovery** | ❌ | ✅ | ✅ (for metadata) |
+| **Deploy downtime** | ~5-15s | None | None |
+| **Vendor lock-in** | Railway-specific | Standard Postgres | Mixed |
+| **Query latency** | ~0.1ms (local disk) | ~1-10ms (network) | Mixed |
+| **Future-proof** | Limited (single container, no replicas) | ✅ Scales indefinitely | Medium |
+
+### Recommendation
+
+**Short-term: Railway Volume Mount.** It's a 5-minute fix with zero code changes. The app is a capstone project with a single backend container — no need for replicas or horizontal scaling yet. $0.15/mo for a 1GB volume is negligible.
+
+**Long-term (if the project grows): Neon Postgres.** When the app needs multiple replicas, point-in-time recovery, or outgrows SQLite's single-writer limitation, migrate to Neon. The free tier (5GB, scale-to-zero) is more than sufficient. Use the hybrid approach first — move only metadata tables, keep cache tables in SQLite (backed by Redis).
 

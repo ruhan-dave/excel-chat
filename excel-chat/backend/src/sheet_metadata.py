@@ -21,7 +21,7 @@ load_dotenv()
 
 S3_BUCKET = os.environ.get("S3_BUCKET", "ragsheets")
 DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(__file__))
-DB_PATH = os.path.join(DATA_DIR, "sheets.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_DIR, "sheets.db"))
 
 
 # ============================================================================

@@ -91,17 +91,14 @@ def cache_get(model: str, prompt: str) -> str | None:
                     r.incr(f"{key}:hits")
                     r.expire(key, DEFAULT_TTL_SECONDS)
                 except Exception:
-                    # Best-effort bookkeeping — never fail a cache read on
-                    # counter side-effects.
                     pass
                 return val
-            return None
+            # Redis miss — fall through to SQLite (may have data from dual-write)
     except Exception as e:
-        # Connection error, timeout, auth failure — degrade gracefully.
         print(f"⚠️ Redis cache_get failed, falling back to SQLite: {e}")
         reset_redis_client()
 
-    # SQLite fallback.
+    # SQLite fallback / source of truth.
     from sheet_metadata import get_cached_response
     return get_cached_response(model, prompt)
 
@@ -109,45 +106,53 @@ def cache_get(model: str, prompt: str) -> str | None:
 def cache_set(model: str, prompt: str, response: str, ttl: int = DEFAULT_TTL_SECONDS) -> None:
     """Store an LLM response in the cache with the given TTL (default 7 days).
 
-    Writes to Redis when available, otherwise to SQLite. Failures on either
-    backend are logged but never raised — caching is best-effort and a failed
-    write must not break the LLM call path.
+    Dual-write: writes to Redis (when available) AND SQLite (source of truth).
+    Failures on either backend are logged but never raised — caching is
+    best-effort and a failed write must not break the LLM call path.
     """
     key = _redis_key(model, prompt)
+    redis_ok = False
     try:
         r = _get_redis()
         if r is not None:
             r.setex(key, ttl, response)
-            return
+            redis_ok = True
     except Exception as e:
-        print(f"⚠️ Redis cache_set failed, falling back to SQLite: {e}")
+        print(f"⚠️ Redis cache_set failed: {e}")
         reset_redis_client()
 
-    # SQLite fallback.
-    from sheet_metadata import set_cached_response
-    set_cached_response(model, prompt, response)
+    # SQLite write — always (source of truth, not just fallback).
+    try:
+        from sheet_metadata import set_cached_response
+        set_cached_response(model, prompt, response)
+    except Exception as e:
+        if not redis_ok:
+            print(f"⚠️ Both Redis and SQLite cache_set failed: {e}")
+        else:
+            print(f"⚠️ SQLite cache_set failed (Redis write succeeded): {e}")
 
 
 def cache_invalidate_user(user_id: str) -> int:
     """Invalidate all cache entries for a user.
 
-    Stub for the per-user semantic cache that will live alongside this exact-
-    match cache. The semantic cache plan (see scaling.md) stores per-user
-    embeddings under a `semantic_cache:{user_id}:*` namespace; once that
-    module is built this function will fan out to both Redis namespaces.
+    Delegates to semantic_cache.invalidate_user_cache, which fans out to:
+    - Redis semantic:* keys (SCAN + DELETE)
+    - Redis result:* and sandbox:* keys (via result_cache.invalidate_user_results)
+    - SQLite llm_cache rows for the user
+    - SQLite result_cache rows for the user
 
-    Returns the number of keys deleted. Currently always 0 — exact-match
-    cache keys are intentionally not partitioned by user because the cache
-    key is `(model, prompt)` and identical prompts should reuse responses
-    across users (LLM responses don't contain user-specific data).
+    Exact-match cache keys (llm:{hash}) are intentionally NOT invalidated —
+    they are keyed by (model, prompt), not user, and identical prompts should
+    reuse responses across users (LLM responses don't contain user-specific
+    data).
+
+    Returns the total number of entries deleted across all stores.
     """
     if not user_id:
         return 0
-    # Future implementation:
-    #   r = _get_redis()
-    #   if r:
-    #       return sum(
-    #           r.delete(*batch)
-    #           for batch in _chunked(r.scan_iter(f"semantic_cache:{user_id}:*"), 500)
-    #       )
-    return 0
+    try:
+        from semantic_cache import invalidate_user_cache as semantic_invalidate
+        return semantic_invalidate(user_id)
+    except Exception as e:
+        print(f"⚠️ cache_invalidate_user failed: {e}")
+        return 0

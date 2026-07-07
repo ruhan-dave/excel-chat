@@ -19,44 +19,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Redis client (shared with cache_service.py)
+# Redis client (shared singleton from cache_service.py)
 # ---------------------------------------------------------------------------
 
-try:
-    import redis  # type: ignore
-except ImportError:  # pragma: no cover
-    redis = None  # type: ignore
-
-DEFAULT_TTL_SECONDS = 604800  # 7 days
-
-_redis_client: Any = None
-
-
-def _get_redis() -> Any:
-    """Return the shared Redis client, or None if REDIS_URL is unset."""
-    global _redis_client
-    if _redis_client is not None:
-        return _redis_client
-    url = os.environ.get("REDIS_URL")
-    if not url:
-        return None
-    if redis is None:
-        raise RuntimeError(
-            "REDIS_URL is set but the 'redis' package is not installed."
-        )
-    _redis_client = redis.from_url(url, decode_responses=True)
-    return _redis_client
-
-
-def reset_redis_client() -> None:
-    """Clear the cached client. Test helper."""
-    global _redis_client
-    _redis_client = None
+from cache_service import _get_redis, reset_redis_client, DEFAULT_TTL_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -296,11 +266,12 @@ def result_cache_get(user_id: str, key: str) -> str | None:
             val = r.get(redis_key)
             if val is not None:
                 return val
+            # Redis miss — fall through to SQLite (may have data from dual-write)
     except Exception as e:
         print(f"⚠️ Redis result_cache_get failed: {e}")
         reset_redis_client()
 
-    # SQLite fallback
+    # SQLite fallback / source of truth.
     try:
         from sheet_metadata import result_cache_get as sqlite_get
         return sqlite_get(user_id, key)
@@ -317,25 +288,32 @@ def result_cache_set(
     structured_key: str | None = None,
     embedding: list[float] | None = None,
 ) -> None:
-    """Store a result in the cache."""
+    """Store a result in the cache.
+
+    Dual-write: writes to Redis (when available) AND SQLite (source of truth).
+    """
     if not user_id:
         user_id = "anonymous"
     redis_key = f"{_RESULT_PREFIX}{user_id}:{key}"
+    redis_ok = False
     try:
         r = _get_redis()
         if r is not None:
             r.setex(redis_key, DEFAULT_TTL_SECONDS, value)
-            return
+            redis_ok = True
     except Exception as e:
         print(f"⚠️ Redis result_cache_set failed: {e}")
         reset_redis_client()
 
-    # SQLite fallback
+    # SQLite write — always (source of truth).
     try:
         from sheet_metadata import result_cache_set as sqlite_set
         sqlite_set(user_id, key, value, cache_type, description, structured_key, embedding)
     except Exception as e:
-        print(f"⚠️ SQLite result_cache_set failed: {e}")
+        if not redis_ok:
+            print(f"⚠️ Both Redis and SQLite result_cache_set failed: {e}")
+        else:
+            print(f"⚠️ SQLite result_cache_set failed (Redis write succeeded): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -354,11 +332,12 @@ def sandbox_cache_get(user_id: str, code: str) -> str | None:
             val = r.get(redis_key)
             if val is not None:
                 return val
+            # Redis miss — fall through to SQLite
     except Exception as e:
         print(f"⚠️ Redis sandbox_cache_get failed: {e}")
         reset_redis_client()
 
-    # SQLite fallback — use the hash as the key
+    # SQLite fallback / source of truth.
     try:
         from sheet_metadata import result_cache_get as sqlite_get
         return sqlite_get(user_id, ch)
@@ -367,26 +346,33 @@ def sandbox_cache_get(user_id: str, code: str) -> str | None:
 
 
 def sandbox_cache_set(user_id: str, code: str, value: str) -> None:
-    """Store a sandbox execution result."""
+    """Store a sandbox execution result.
+
+    Dual-write: writes to Redis (when available) AND SQLite (source of truth).
+    """
     if not user_id:
         user_id = "anonymous"
     ch = code_hash(code)
     redis_key = f"{_SANDBOX_PREFIX}{user_id}:{ch}"
+    redis_ok = False
     try:
         r = _get_redis()
         if r is not None:
             r.setex(redis_key, DEFAULT_TTL_SECONDS, value)
-            return
+            redis_ok = True
     except Exception as e:
         print(f"⚠️ Redis sandbox_cache_set failed: {e}")
         reset_redis_client()
 
-    # SQLite fallback
+    # SQLite write — always (source of truth).
     try:
         from sheet_metadata import result_cache_set as sqlite_set
         sqlite_set(user_id, ch, value, "sandbox")
     except Exception as e:
-        print(f"⚠️ SQLite sandbox_cache_set failed: {e}")
+        if not redis_ok:
+            print(f"⚠️ Both Redis and SQLite sandbox_cache_set failed: {e}")
+        else:
+            print(f"⚠️ SQLite sandbox_cache_set failed (Redis write succeeded): {e}")
 
 
 # ---------------------------------------------------------------------------

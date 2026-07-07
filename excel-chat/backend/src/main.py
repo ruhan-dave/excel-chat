@@ -26,6 +26,9 @@ from sheet_metadata import (
     get_cache_stats, cleanup_old_cache_entries,
     touch_file_access, find_stale_files, delete_files_older_than,
     invalidate_user_cache as sqlite_invalidate_user_cache,
+    create_thread, get_threads, get_thread, update_thread, delete_thread,
+    get_thread_sheet_ids, save_message, get_thread_messages,
+    auto_title_thread, find_similar_in_thread, get_sheet,
 )
 from semantic_cache import (
     embed_query, find_similar_cached, store_cached,
@@ -634,6 +637,8 @@ async def query_rag(
 @app.get("/query/stream")
 async def query_stream(
     query: str,
+    thread_id: str | None = None,
+    sheet_ids: str | None = None,
     x_user_id: str | None = Header(default=None, alias="X-User-ID"),
 ):
     """Stream query results as Server-Sent Events.
@@ -644,9 +649,13 @@ async def query_stream(
       - pre_populated: {"values": {...}}
       - execution: {"step_results": {...}, "final_answer": ..., "explanation": "..."}
       - friendly:  {"response": "..."}
-      - done:      {"timings": {...}, "total": ...}
+      - done:      {"timings": {...}, "total": ..., "message_id": "..."}
       - error:     {"message": "..."}
       - cached:    {"answer": ..., "friendly_response": ..., "similarity": ...}
+
+    Optional params:
+      - thread_id: If provided, Q&A is persisted to the messages table
+      - sheet_ids: Comma-separated sheet IDs. If provided, only load those sheets
     """
     import asyncio
 
@@ -668,14 +677,18 @@ async def query_stream(
                 return
 
             # --- Semantic cache check ---
+            is_cached = False
+            cached_friendly = None
             try:
                 query_embedding = embed_query(query)
                 cached_response, similarity = find_similar_cached(
                     user_id, query_embedding, threshold=0.88
                 )
                 if cached_response is not None:
+                    is_cached = True
                     cached_result = json.loads(cached_response) if isinstance(cached_response, str) else None
                     if isinstance(cached_result, dict):
+                        cached_friendly = cached_result.get("friendly_response", "")
                         payload = {
                             "answer": cached_result.get("answer", cached_response),
                             "friendly_response": cached_result.get("friendly_response", ""),
@@ -684,13 +697,38 @@ async def query_stream(
                         }
                     else:
                         payload = {"answer": cached_response, "friendly_response": "", "cached": True, "similarity": similarity}
+
+                    # Persist cached response to thread if thread_id provided
+                    if thread_id:
+                        try:
+                            msg_id = str(uuid.uuid4())
+                            save_message(
+                                message_id=msg_id,
+                                thread_id=thread_id,
+                                user_id=user_id,
+                                role="user",
+                                content=query,
+                                query=query,
+                                friendly_response=cached_friendly or "",
+                                full_result=cached_response if isinstance(cached_response, str) else json.dumps(cached_response),
+                                sheet_ids=sheet_ids,
+                                cached=1,
+                            )
+                            auto_title_thread(thread_id, query)
+                        except Exception as e:
+                            print(f"⚠️ Failed to save cached message to thread: {e}")
+
                     yield f"event: cached\ndata: {json.dumps(payload)}\n\n"
                     return
             except Exception as e:
                 print(f"⚠️ Semantic cache lookup failed (stream): {e}")
 
             # --- Load sheets from S3 ---
+            # If sheet_ids provided, filter to only those sheets
+            selected_sheet_ids_set = set(sheet_ids.split(",")) if sheet_ids else None
             all_sheet_metas = get_all_sheets(user_id=user_id)
+            if selected_sheet_ids_set:
+                all_sheet_metas = [m for m in all_sheet_metas if m.sheet_id in selected_sheet_ids_set]
             if not all_sheet_metas:
                 yield f"event: error\ndata: {json.dumps({'message': 'No sheets uploaded. Please upload an Excel file first.'})}\n\n"
                 return
@@ -789,6 +827,34 @@ async def query_stream(
             except Exception as e:
                 print(f"⚠️ Failed to write semantic cache entry (stream): {e}")
 
+            # --- Persist to thread if thread_id provided ---
+            message_id = None
+            if thread_id:
+                try:
+                    message_id = str(uuid.uuid4())
+                    friendly_text = result.get("friendly_response", "") if isinstance(result, dict) else ""
+                    save_message(
+                        message_id=message_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        role="user",
+                        content=query,
+                        query=query,
+                        friendly_response=friendly_text,
+                        full_result=json.dumps(result, default=str) if isinstance(result, dict) else str(result),
+                        sheet_ids=sheet_ids,
+                        cached=1 if is_cached else 0,
+                    )
+                    auto_title_thread(thread_id, query)
+                except Exception as e:
+                    print(f"⚠️ Failed to save message to thread: {e}")
+
+            # Emit done event with message_id if persisted
+            done_payload = {"timings": result.get("timings", {}) if isinstance(result, dict) else {}, "total": result.get("total_time", 0) if isinstance(result, dict) else 0}
+            if message_id:
+                done_payload["message_id"] = message_id
+            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+
         except Exception as e:
             print(f"Error in query_stream: {str(e)}")
             import traceback
@@ -810,6 +876,112 @@ async def query_stream(
 
 
 # ============================================================================
+# Thread & Message Management
+# ============================================================================
+
+class CreateThreadRequest(PydanticBaseModel):
+    title: str = "New Thread"
+    sheet_ids: list[str] = []
+
+class UpdateThreadRequest(PydanticBaseModel):
+    title: str | None = None
+    add_sheet_ids: list[str] | None = None
+    remove_sheet_ids: list[str] | None = None
+
+
+@app.post("/threads")
+async def create_thread_endpoint(
+    req: CreateThreadRequest,
+    x_user_id: str | None = Header(default=None, alias="X-User-ID"),
+):
+    user_id = x_user_id or "anonymous"
+    result = create_thread(user_id=user_id, title=req.title, sheet_ids=req.sheet_ids)
+    return result
+
+
+@app.get("/threads")
+async def list_threads_endpoint(
+    x_user_id: str | None = Header(default=None, alias="X-User-ID"),
+):
+    user_id = x_user_id or "anonymous"
+    threads = get_threads(user_id=user_id)
+    return {"threads": threads}
+
+
+@app.get("/threads/{thread_id}")
+async def get_thread_endpoint(thread_id: str):
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    messages = get_thread_messages(thread_id)
+    sheet_ids = get_thread_sheet_ids(thread_id)
+    sheets = []
+    for sid in sheet_ids:
+        s = get_sheet(sid)
+        if s:
+            sheets.append(s)
+    return {"thread": thread, "messages": messages, "sheets": sheets}
+
+
+@app.patch("/threads/{thread_id}")
+async def update_thread_endpoint(thread_id: str, req: UpdateThreadRequest):
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    update_thread(
+        thread_id,
+        title=req.title,
+        add_sheet_ids=req.add_sheet_ids,
+        remove_sheet_ids=req.remove_sheet_ids,
+    )
+    updated = get_thread(thread_id)
+    return {"thread": updated}
+
+
+@app.delete("/threads/{thread_id}")
+async def delete_thread_endpoint(thread_id: str):
+    deleted = delete_thread(thread_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return {"message": "Thread deleted", "thread_id": thread_id}
+
+
+@app.get("/threads/{thread_id}/messages")
+async def get_thread_messages_endpoint(thread_id: str):
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    messages = get_thread_messages(thread_id)
+    return {"messages": messages}
+
+
+@app.get("/threads/{thread_id}/similar")
+async def find_similar_in_thread_endpoint(
+    thread_id: str,
+    query: str,
+):
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    try:
+        query_embedding = embed_query(query)
+        if query_embedding is None:
+            return {"found": False, "reason": "embedding model unavailable"}
+        emb_list = query_embedding.tolist()
+        match = find_similar_in_thread(thread_id, emb_list)
+        if match:
+            return {
+                "found": True,
+                "message_id": match["message_id"],
+                "similarity": match.get("similarity", 0.0),
+                "friendly_response": match.get("friendly_response", ""),
+            }
+        return {"found": False}
+    except Exception as e:
+        return {"found": False, "error": str(e)}
+
+
+# ============================================================================
 # Cache & Storage Management
 # ============================================================================
 
@@ -826,6 +998,40 @@ async def cache_stats(
     effective_user = user_id or x_user_id or None
     stats = get_cache_stats(user_id=effective_user)
     stats["semantic_cache_available"] = semantic_cache_available()
+
+    redis_info: dict = {"connected": False}
+    try:
+        from cache_service import _get_redis
+        r = _get_redis()
+        if r is not None:
+            r.ping()
+            redis_info["connected"] = True
+            redis_url = os.environ.get("REDIS_URL", "")
+            redis_info["url"] = redis_url.split("@")[-1] if "@" in redis_url else "configured"
+            try:
+                info = r.info("memory")
+                redis_info["used_memory_human"] = info.get("used_memory_human", "?")
+                redis_info["used_memory_peak_human"] = info.get("used_memory_peak_human", "?")
+            except Exception:
+                pass
+            try:
+                redis_info["total_keys"] = r.dbsize()
+            except Exception:
+                pass
+            try:
+                namespaces = {}
+                for prefix in ["llm:", "semantic:", "result:", "sandbox:"]:
+                    count = 0
+                    for _ in r.scan_iter(match=f"{prefix}*", count=100):
+                        count += 1
+                    namespaces[prefix.rstrip(":")] = count
+                redis_info["keys_by_namespace"] = namespaces
+            except Exception:
+                pass
+    except Exception as e:
+        redis_info["error"] = str(e)
+    stats["redis"] = redis_info
+
     return stats
 
 

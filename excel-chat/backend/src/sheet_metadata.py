@@ -179,6 +179,51 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_result_cache_user_type
         ON result_cache(user_id, cache_type);
     """)
+
+    # Thread / message tables for conversation persistence
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS threads (
+            thread_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL DEFAULT 'anonymous',
+            title TEXT NOT NULL DEFAULT 'New Thread',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_message_preview TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS thread_sheets (
+            thread_id TEXT NOT NULL,
+            sheet_id TEXT NOT NULL,
+            added_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (thread_id, sheet_id),
+            FOREIGN KEY (thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE,
+            FOREIGN KEY (sheet_id) REFERENCES sheets(sheet_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            message_id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT 'anonymous',
+            role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            query TEXT,
+            friendly_response TEXT,
+            full_result TEXT,
+            sheet_ids TEXT,
+            cached INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_threads_user
+        ON threads(user_id);
+
+        CREATE INDEX IF NOT EXISTS idx_messages_thread
+        ON messages(thread_id);
+
+        CREATE INDEX IF NOT EXISTS idx_thread_sheets_thread
+        ON thread_sheets(thread_id);
+    """)
     conn.commit()
     conn.close()
 
@@ -758,3 +803,248 @@ def invalidate_user_result_cache(user_id: str) -> int:
     conn.commit()
     conn.close()
     return deleted
+
+
+# ============================================================================
+# Thread & Message CRUD (conversation persistence)
+# ============================================================================
+
+def create_thread(
+    user_id: str = "anonymous",
+    title: str = "New Thread",
+    sheet_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create a new thread and optionally associate sheets with it."""
+    import uuid
+    thread_id = str(uuid.uuid4())
+    conn = _get_db()
+    conn.execute(
+        "INSERT INTO threads (thread_id, user_id, title) VALUES (?, ?, ?)",
+        (thread_id, user_id, title),
+    )
+    if sheet_ids:
+        for sid in sheet_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO thread_sheets (thread_id, sheet_id) VALUES (?, ?)",
+                (thread_id, sid),
+            )
+    conn.commit()
+    conn.close()
+    return {"thread_id": thread_id, "title": title, "sheet_ids": sheet_ids or []}
+
+
+def get_threads(user_id: str = "anonymous") -> list[dict[str, Any]]:
+    """List all threads for a user, newest first."""
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT t.thread_id, t.title, t.created_at, t.updated_at, t.last_message_preview, "
+        "COUNT(ts.sheet_id) as sheet_count "
+        "FROM threads t LEFT JOIN thread_sheets ts ON t.thread_id = ts.thread_id "
+        "WHERE t.user_id = ? GROUP BY t.thread_id ORDER BY t.updated_at DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_thread(thread_id: str) -> dict[str, Any] | None:
+    """Get a single thread by ID."""
+    conn = _get_db()
+    row = conn.execute(
+        "SELECT thread_id, user_id, title, created_at, updated_at, last_message_preview "
+        "FROM threads WHERE thread_id = ?",
+        (thread_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_thread(
+    thread_id: str,
+    title: str | None = None,
+    add_sheet_ids: list[str] | None = None,
+    remove_sheet_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Update a thread's title and/or add/remove sheets."""
+    conn = _get_db()
+    if title is not None:
+        conn.execute(
+            "UPDATE threads SET title = ?, updated_at = datetime('now') WHERE thread_id = ?",
+            (title, thread_id),
+        )
+    if add_sheet_ids:
+        for sid in add_sheet_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO thread_sheets (thread_id, sheet_id) VALUES (?, ?)",
+                (thread_id, sid),
+            )
+    if remove_sheet_ids:
+        for sid in remove_sheet_ids:
+            conn.execute(
+                "DELETE FROM thread_sheets WHERE thread_id = ? AND sheet_id = ?",
+                (thread_id, sid),
+            )
+    conn.execute(
+        "UPDATE threads SET updated_at = datetime('now') WHERE thread_id = ?",
+        (thread_id,),
+    )
+    conn.commit()
+    conn.close()
+    return {"thread_id": thread_id, "title": title}
+
+
+def delete_thread(thread_id: str) -> bool:
+    """Delete a thread and all its messages and sheet associations."""
+    conn = _get_db()
+    conn.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
+    conn.execute("DELETE FROM thread_sheets WHERE thread_id = ?", (thread_id,))
+    cursor = conn.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
+    conn.commit()
+    conn.close()
+    return cursor.rowcount > 0
+
+
+def get_thread_sheet_ids(thread_id: str) -> list[str]:
+    """Get the sheet IDs associated with a thread."""
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT sheet_id FROM thread_sheets WHERE thread_id = ?",
+        (thread_id,),
+    ).fetchall()
+    conn.close()
+    return [r["sheet_id"] for r in rows]
+
+
+def save_message(
+    message_id: str,
+    thread_id: str,
+    user_id: str = "anonymous",
+    role: str = "user",
+    content: str = "",
+    query: str | None = None,
+    friendly_response: str | None = None,
+    full_result: str | None = None,
+    sheet_ids: str | None = None,
+    cached: int = 0,
+) -> None:
+    """Save a message to the messages table."""
+    conn = _get_db()
+    conn.execute(
+        "INSERT INTO messages "
+        "(message_id, thread_id, user_id, role, content, query, "
+        "friendly_response, full_result, sheet_ids, cached) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (message_id, thread_id, user_id, role, content, query,
+         friendly_response, full_result, sheet_ids, cached),
+    )
+    conn.execute(
+        "UPDATE threads SET updated_at = datetime('now'), "
+        "last_message_preview = ? WHERE thread_id = ?",
+        (content[:200], thread_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_thread_messages(thread_id: str, role: str | None = None) -> list[dict[str, Any]]:
+    """Get all messages in a thread, optionally filtered by role."""
+    conn = _get_db()
+    if role:
+        rows = conn.execute(
+            "SELECT message_id, thread_id, role, content, query, "
+            "friendly_response, full_result, sheet_ids, cached, created_at "
+            "FROM messages WHERE thread_id = ? AND role = ? ORDER BY created_at ASC",
+            (thread_id, role),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT message_id, thread_id, role, content, query, "
+            "friendly_response, full_result, sheet_ids, cached, created_at "
+            "FROM messages WHERE thread_id = ? ORDER BY created_at ASC",
+            (thread_id,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def auto_title_thread(thread_id: str, title: str) -> None:
+    """Set the thread title if it's still the default 'New Thread'."""
+    conn = _get_db()
+    conn.execute(
+        "UPDATE threads SET title = ?, updated_at = datetime('now') "
+        "WHERE thread_id = ? AND title = 'New Thread'",
+        (title[:100], thread_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def find_similar_in_thread(
+    thread_id: str,
+    query_embedding: list[float],
+    threshold: float = 0.92,
+) -> dict[str, Any] | None:
+    """Find a similar previous question in the same thread.
+
+    Compares the query embedding against all user messages in the thread.
+    Returns the matching message dict or None.
+    """
+    import numpy as np
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT message_id, content, friendly_response, full_result "
+        "FROM messages WHERE thread_id = ? AND role = 'user' "
+        "ORDER BY created_at ASC",
+        (thread_id,),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return None
+
+    q = np.asarray(query_embedding, dtype=np.float64)
+    q_norm = float(np.linalg.norm(q))
+    if q_norm == 0.0:
+        return None
+
+    best_msg = None
+    best_score = 0.0
+    for r in rows:
+        try:
+            from semantic_cache import embed_query
+            prev_emb = embed_query(r["content"])
+            if prev_emb is None:
+                continue
+            v = prev_emb.astype(np.float64)
+            v_norm = float(np.linalg.norm(v))
+            if v_norm == 0.0:
+                continue
+            score = float(np.dot(q, v) / (q_norm * v_norm))
+            if score > best_score:
+                best_score = score
+                best_msg = dict(r)
+        except Exception:
+            continue
+
+    if best_msg is not None and best_score >= threshold:
+        best_msg["similarity"] = best_score
+        return best_msg
+    return None
+
+
+def get_sheet(sheet_id: str) -> dict[str, Any] | None:
+    """Get a single sheet by ID."""
+    conn = _get_db()
+    row = conn.execute(
+        "SELECT sheet_id, file_id, file_name, sheet_name, s3_key, "
+        "fields_json, years_json, schema_group, user_description, "
+        "auto_description, row_count, user_id "
+        "FROM sheets WHERE sheet_id = ?",
+        (sheet_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["fields"] = json.loads(d.pop("fields_json") or "[]")
+    d["years"] = json.loads(d.pop("years_json") or "[]")
+    return d

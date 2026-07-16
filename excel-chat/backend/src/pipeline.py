@@ -1,25 +1,46 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from statistics import mean, median, stdev
 from typing import Any, Callable, Literal
 
 import pandas as pd
-import pydantic_monty
 from pydantic import BaseModel, Field, field_validator
-from pydantic_ai import Agent, RunContext, Tool
+from pydantic_ai import Agent, Tool
 from pydantic_ai.models.openai import OpenAIModel
-from pydantic_ai.tools import ToolDefinition
 
 from llama_index.core.prompts import PromptTemplate
 
 from sheet_metadata import SheetMeta
 from guardrails import GUARDRAIL_SYSTEM_PROMPT, inject_disclaimer
+from tools import (
+    PipelineDeps,
+    NAMED_OPERATIONS,
+    retrieve,
+    extract_val,
+    retrieve_batch,
+    execute_python_code,
+    analyze_sheet,
+    find_missing_data,
+    discover_column_types,
+    get_sheet_shape,
+    group_summary_stats,
+    create_pivot_table,
+    crosstab_analysis,
+    drop_missing_columns,
+    convert_to_numerical,
+    correlation_analysis,
+    get_sheet_head,
+    get_sheet_info,
+    value_counts_analysis,
+    deduplicate_rows,
+    get_sheet_dtypes,
+    _prepare_retrieve_tool,
+    _prepare_extract_val_tool,
+    _prepare_retrieve_batch_tool,
+)
 
 
 # ============================================================================
@@ -45,110 +66,7 @@ def timed(stage: str, timings: dict[str, float]):
     finally:
         elapsed = time.perf_counter() - start
         timings[stage] = timings.get(stage, 0.0) + elapsed
-        print(f"⏱️  {stage}: {elapsed:.2f}s")
-
-
-# ============================================================================
-# Named Math Operations
-# ============================================================================
-
-def op_add(*args: float) -> float:
-    return sum(args)
-
-def op_subtract(a: float, b: float) -> float:
-    return a - b
-
-def op_multiply(*args: float) -> float:
-    result = 1.0
-    for a in args:
-        result *= a
-    return result
-
-def op_divide(a: float, b: float) -> float | None:
-    return a / b if b != 0 else None
-
-def op_percentage(a: float, b: float) -> float | None:
-    return (a / b) * 100 if b != 0 else None
-
-def op_sqrt(a: float) -> float:
-    return math.sqrt(a)
-
-def op_power(a: float, b: float) -> float:
-    return math.pow(a, b)
-
-def op_log(a: float, base: float = math.e) -> float | None:
-    return math.log(a, base) if a > 0 else None
-
-def op_exp(a: float) -> float:
-    return math.exp(a)
-
-def op_abs(a: float) -> float:
-    return abs(a)
-
-def op_negate(a: float) -> float:
-    return -a
-
-def op_max(*args: float) -> float:
-    return max(args)
-
-def op_min(*args: float) -> float:
-    return min(args)
-
-def op_average(*args: float) -> float | None:
-    return mean(args) if args else None
-
-def op_median(*args: float) -> float | None:
-    return median(args) if args else None
-
-def op_yoy_growth(current: float, previous: float) -> float | None:
-    return ((current - previous) / previous) * 100 if previous != 0 else None
-
-def op_cagr(end_value: float, start_value: float, num_years: float) -> float | None:
-    if start_value <= 0 or num_years <= 0:
-        return None
-    return ((end_value / start_value) ** (1 / num_years) - 1) * 100
-
-def op_ratio(a: float, b: float) -> float | None:
-    return a / b if b != 0 else None
-
-def op_percentage_change(new: float, old: float) -> float | None:
-    return ((new - old) / old) * 100 if old != 0 else None
-
-def op_difference(a: float, b: float) -> float:
-    return abs(a - b)
-
-def op_stdev(*args: float) -> float | None:
-    return stdev(args) if len(args) >= 2 else None
-
-NAMED_OPERATIONS: dict[str, Callable[..., Any]] = {
-    "add": op_add,
-    "subtract": op_subtract,
-    "multiply": op_multiply,
-    "divide": op_divide,
-    "return_percentage": op_percentage,
-    "sqrt": op_sqrt,
-    "power": op_power,
-    "log": op_log,
-    "exp": op_exp,
-    "abs": op_abs,
-    "negate": op_negate,
-    "max": op_max,
-    "min": op_min,
-    "average": op_average,
-    "median": op_median,
-    "yoy_growth": op_yoy_growth,
-    "cagr": op_cagr,
-    "ratio": op_ratio,
-    "percentage_change": op_percentage_change,
-    "difference": op_difference,
-    "stdev": op_stdev,
-}
-
-UNARY_OPERATIONS = {"sqrt", "abs", "negate", "exp"}
-BINARY_OPERATIONS = {"subtract", "divide", "return_percentage", "power", "log",
-                     "yoy_growth", "ratio", "percentage_change", "difference"}
-TERNARY_OPERATIONS = {"cagr"}
-N_ARY_OPERATIONS = {"add", "multiply", "max", "min", "average", "median", "stdev"}
+        print(f"[{stage}] {elapsed:.2f}s")
 
 
 # ============================================================================
@@ -294,29 +212,6 @@ class FriendlyResponse(BaseModel):
 
 
 # ============================================================================
-# Dependencies
-# ============================================================================
-
-@dataclass
-class PipelineDeps:
-    """Dependencies passed through RunContext to tools and agents."""
-    sheets: dict[str, pd.DataFrame]
-    sheet_metas: list[SheetMeta]
-    original_query: str
-    computed_values: dict[str, Any] = field(default_factory=dict)
-    available_fields: list[str] = field(default_factory=list)
-    available_years: list[str] = field(default_factory=list)
-    user_id: str = "anonymous"
-
-    @property
-    def df(self) -> pd.DataFrame:
-        """Backward-compatible single-df access: returns the first sheet's df."""
-        if self.sheets:
-            return next(iter(self.sheets.values()))
-        return pd.DataFrame()
-
-
-# ============================================================================
 # Model Factory
 # ============================================================================
 
@@ -327,337 +222,6 @@ def build_openrouter_model() -> OpenAIModel:
         base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         api_key=os.environ.get("OPENROUTER_API_KEY"),
     )
-
-
-# ============================================================================
-# Tools
-# ============================================================================
-
-def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
-    """Retrieve a numeric value from the financial DataFrame(s).
-
-    If a sheet name is provided, search only that sheet.
-    If no sheet name is provided, search across all sheets and return
-    all matching values (useful for cross-sheet comparisons in consistent-schema groups).
-    """
-    # Layer 1: Check result cache before scanning DataFrame
-    try:
-        from result_cache import build_retrieve_key, result_cache_get, result_cache_set
-        cache_key = build_retrieve_key(field, year, sheet)
-        cached = result_cache_get(ctx.deps.user_id, cache_key)
-        if cached is not None:
-            return cached
-    except Exception:
-        pass  # cache unavailable — proceed with DataFrame scan
-
-    sheets = ctx.deps.sheets
-    if not sheets:
-        return "ERROR: No sheets available."
-
-    if sheet and sheet in sheets:
-        df = sheets[sheet]
-        if field in df.index and year in df.columns:
-            val = df.loc[field, year]
-            result = str(float(val))
-        else:
-            return f"ERROR: '{field}' or '{year}' not found in sheet '{sheet}'."
-    else:
-        # Search across all sheets
-        results = []
-        for sheet_name, df in sheets.items():
-            if field in df.index and year in df.columns:
-                val = df.loc[field, year]
-                results.append(f"{sheet_name}: {float(val)}")
-
-        if results:
-            result = "; ".join(results)
-        else:
-            return f"ERROR: '{field}' or '{year}' not found in any sheet."
-
-    # Layer 1: Store result in cache (skip error returns)
-    try:
-        from result_cache import build_retrieve_key, result_cache_set
-        cache_key = build_retrieve_key(field, year, sheet)
-        result_cache_set(ctx.deps.user_id, cache_key, result, cache_type="retrieve")
-    except Exception:
-        pass
-
-    return result
-
-
-def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
-    """Extract a single value from the DataFrame by field and year (optionally from a specific sheet)."""
-    return retrieve(ctx, field, year, sheet)
-
-
-def retrieve_batch(
-    ctx: RunContext[PipelineDeps],
-    field: str,
-    years: list[str],
-    sheet: str = "",
-) -> str:
-    """Retrieve multiple year values for a single field in ONE tool call.
-
-    Optimization 1: collapses N sequential ``retrieve(field, year)`` calls
-    (each a separate LLM round-trip) into a single round-trip. For a query
-    like "lowest capital expenditure 2018-2022", this saves ~10-32s vs the
-    single-value tool.
-
-    Args:
-        field: The financial field to look up (e.g. "Capital expenditure").
-        years: List of years to retrieve (e.g. ["2018", "2019", "2020"]).
-        sheet: Optional sheet name to restrict search.
-
-    Returns a JSON string like ``{"2018": 1500.0, "2019": 1200.0}`` (single-
-    sheet mode) or ``{"2018": {"Sheet1": 1500.0, "Sheet2": 1300.0}, ...}``
-    (cross-sheet mode). Per-year errors are returned as ``null`` for that key
-    so a partial result is still useful.
-    """
-    if not years:
-        return json.dumps({})
-
-    # Per-call cache so repeated batches hit the Layer-1 retrieve cache
-    # without re-scanning DataFrames.
-    try:
-        from result_cache import build_retrieve_key, result_cache_get, result_cache_set
-        use_cache = True
-    except Exception:
-        use_cache = False
-
-    sheets = ctx.deps.sheets
-    if not sheets:
-        return json.dumps({"error": "No sheets available."})
-
-    result_obj: dict[str, Any] = {}
-    if sheet and sheet in sheets:
-        df = sheets[sheet]
-        for year in years:
-            cache_key = build_retrieve_key(field, year, sheet) if use_cache else None
-            if use_cache:
-                cached = result_cache_get(ctx.deps.user_id, cache_key)
-                if cached is not None:
-                    try:
-                        result_obj[year] = float(cached)
-                        continue
-                    except (TypeError, ValueError):
-                        pass  # fall through to DataFrame scan
-            if field in df.index and year in df.columns:
-                try:
-                    val = float(df.loc[field, year])
-                    result_obj[year] = val
-                    if use_cache:
-                        result_cache_set(ctx.deps.user_id, cache_key, str(val), cache_type="retrieve")
-                except (TypeError, ValueError):
-                    result_obj[year] = None
-            else:
-                result_obj[year] = None
-    else:
-        # Cross-sheet mode: group values by year → {sheet: value}.
-        # NOTE: deliberately skip the cache read here. The retrieve cache key
-        # ``field_year`` (no sheet) is shared with single-sheet retrievals, so
-        # reading from it could return a stale value from a different user's
-        # sheet set. Writes are similarly skipped — callers can use
-        # sheet-scoped retrievals for cacheable values.
-        for year in years:
-            matches: dict[str, float] = {}
-            for sheet_name, df in sheets.items():
-                if field in df.index and year in df.columns:
-                    try:
-                        matches[sheet_name] = float(df.loc[field, year])
-                    except (TypeError, ValueError):
-                        continue
-            if matches:
-                # Single match → scalar; multiple → per-sheet dict.
-                result_obj[year] = next(iter(matches.values())) if len(matches) == 1 else matches
-            else:
-                result_obj[year] = None
-
-    return json.dumps(result_obj)
-
-
-async def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
-    """
-    Execute Python code in a secure sandbox using pydantic-monty.
-
-    Use this tool for ALL calculations after retrieving the needed values.
-    The code should define variables for any retrieved values, then use a
-    `return` statement to return the final result.
-
-    Example:
-        code = '''
-        revenue_2022 = 1500000
-        expenses_2022 = 800000
-        margin = (revenue_2022 - expenses_2022) / revenue_2022 * 100
-        return margin
-        '''
-
-    Available in the sandbox:
-    - Basic Python syntax and operators
-    - math module (math.sqrt, math.pow, etc.)
-    - Common builtins (abs, round, min, max, sum, len, sorted)
-    """
-    import io
-    import sys
-
-    # Layer 2: Check sandbox cache before executing
-    try:
-        from result_cache import sandbox_cache_get, sandbox_cache_set
-        cached = sandbox_cache_get(ctx.deps.user_id, code)
-        if cached is not None:
-            return cached
-    except Exception:
-        pass
-
-    try:
-        # Dedent multi-line code — LLM often generates indented blocks
-        # (e.g. inside a triple-quoted string) which pydantic-monty rejects
-        # with "Unexpected indentation". textwrap.dedent removes the common
-        # leading whitespace from all lines.
-        import textwrap
-        code = textwrap.dedent(code).strip()
-
-        # Modify code to ensure it has a return statement if it doesn't
-        # If code assigns to 'result' or 'result_', add a return statement
-        code_stripped = code.strip()
-        if not code_stripped.startswith("return"):
-            # Check if it assigns to result variable
-            if "result " in code or "result=" in code:
-                # Extract the last line that assigns to result
-                lines = code.split("\n")
-                for line in reversed(lines):
-                    if "result" in line and ("=" in line or "result" in line):
-                        # Convert assignment to return
-                        if "=" in line:
-                            expr = line.split("=", 1)[1].strip()
-                            code = f"return {expr}"
-                        else:
-                            code = f"return {line}"
-                        break
-        
-        # Create type definitions for the sandbox
-        type_defs = """
-import math
-from typing import Any
-
-# Computed values from the pipeline will be injected
-"""
-        
-        # Add computed values to type definitions
-        for key, value in ctx.deps.computed_values.items():
-            if isinstance(value, (int, float)):
-                type_defs += f"{key}: float = 0.0\n"
-            else:
-                type_defs += f"{key}: Any = None\n"
-        
-        # Prepare external functions that the sandbox can call
-        external_functions = {}
-        
-        # Create the Monty instance
-        m = pydantic_monty.Monty(
-            code,
-            inputs=[],
-            script_name="sandbox.py",
-            type_check=False,
-            type_check_stubs=type_defs,
-        )
-        
-        # Capture stdout
-        old_stdout = sys.stdout
-        stdout_capture = io.StringIO()
-        
-        try:
-            sys.stdout = stdout_capture
-            
-            # Run the code directly in the async context
-            output = await m.run_async(
-                inputs={},
-                external_functions=external_functions,
-            )
-            
-            # Get captured stdout
-            stdout_output = stdout_capture.getvalue()
-            
-            # Return output from return statement or stdout
-            if output is not None:
-                result = str(output)
-            elif stdout_output:
-                result = stdout_output.strip()
-            else:
-                result = "Code executed successfully (no output)"
-
-            # Layer 2: Store successful sandbox result in cache
-            try:
-                from result_cache import sandbox_cache_set
-                sandbox_cache_set(ctx.deps.user_id, code, result)
-            except Exception:
-                pass
-
-            return result
-                
-        finally:
-            sys.stdout = old_stdout
-        
-    except Exception as e:
-        return f"ERROR: {type(e).__name__}: {str(e)}"
-
-
-# ============================================================================
-# Tool Prepare Functions (dynamic schema customization)
-# ============================================================================
-
-async def _prepare_retrieve_tool(
-    ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
-) -> ToolDefinition | None:
-    """Inject available fields/years/sheets into the retrieve tool schema."""
-    fields = ctx.deps.available_fields
-    years = ctx.deps.available_years
-    sheet_names = list(ctx.deps.sheets.keys())
-    tool_def.parameters_json_schema["properties"]["field"]["description"] = (
-        f"Field name from available fields: {', '.join(fields)}"
-    )
-    tool_def.parameters_json_schema["properties"]["year"]["description"] = (
-        f"Year from available years: {', '.join(years)}"
-    )
-    if "sheet" in tool_def.parameters_json_schema.get("properties", {}):
-        tool_def.parameters_json_schema["properties"]["sheet"]["description"] = (
-            f"Sheet name (optional). Available sheets: {', '.join(sheet_names)}. "
-            f"If omitted, searches all sheets."
-        )
-    return tool_def
-
-
-async def _prepare_extract_val_tool(
-    ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
-) -> ToolDefinition | None:
-    """Inject available fields/years/sheets into the extract_val tool schema."""
-    return await _prepare_retrieve_tool(ctx, tool_def)
-
-
-async def _prepare_retrieve_batch_tool(
-    ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
-) -> ToolDefinition | None:
-    """Inject available fields/years/sheets into the retrieve_batch tool schema."""
-    fields = ctx.deps.available_fields
-    years = ctx.deps.available_years
-    sheet_names = list(ctx.deps.sheets.keys())
-    props = tool_def.parameters_json_schema.get("properties", {})
-    if "field" in props:
-        props["field"]["description"] = (
-            f"Field name from available fields: {', '.join(fields)}"
-        )
-    if "years" in props:
-        props["years"]["description"] = (
-            f"List of years from available years: {', '.join(years)}. "
-            f"Pass multiple years to fetch them in a single tool call."
-        )
-        # Allow a small array (most queries want 2-10 years).
-        props["years"].setdefault("minItems", 1)
-    if "sheet" in props:
-        props["sheet"]["description"] = (
-            f"Sheet name (optional). Available sheets: {', '.join(sheet_names)}. "
-            f"If omitted, searches all sheets."
-        )
-    return tool_def
 
 
 # ============================================================================
@@ -813,11 +377,41 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
        mode, or {{"2018": {{"Sheet1": 1500.0, "Sheet2": 1300.0}}}} for cross-sheet mode.
     3. execute_python_code — run Python code in a secure sandbox to perform ANY calculation
 
+    You also have EDA (exploratory data analysis) tools for DataFrame-level inspection:
+    4. analyze_sheet(sheet_name) — comprehensive EDA: dimensions, describe(), duplicates, per-column stats
+    5. find_missing_data(sheet_name) — missing data report (counts and percentages per column)
+    6. discover_column_types(sheet_name) — classify columns as categorical/discrete/continuous
+    7. get_sheet_shape(sheet_name) — return row x column dimensions
+    8. group_summary_stats(sheet_name, group_col, value_col) — groupby with count/sum/mean/median/std/min/max
+    9. create_pivot_table(sheet_name, index, columns, values) — pivot table with mean aggregation
+    10. crosstab_analysis(sheet_name, col1, col2, aggfunc) — cross-tabulation (aggfunc: mean/median/count/std)
+    11. drop_missing_columns(sheet_name, threshold) — drop columns with missing data above threshold fraction
+    12. convert_to_numerical(sheet_name, columns) — convert categorical columns to numerical, fill NaN with mean
+    13. correlation_analysis(sheet_name, columns) — full correlation matrix for numerical columns
+    14. get_sheet_head(sheet_name, n) — first N rows (like df.head(n))
+    15. get_sheet_info(sheet_name) — dtypes, non-null counts, memory usage (like df.info())
+    16. value_counts_analysis(sheet_name, column, normalize) — value counts for a column
+    17. deduplicate_rows(sheet_name, subset) — find and report duplicate rows
+    18. get_sheet_dtypes(sheet_name) — dtype of each column
+
+    Use EDA tools when the user asks about data quality, distributions, correlations,
+    missing values, column types, or wants a summary/overview of the data.
+    Use retrieve/retrieve_batch + execute_python_code for specific value lookups and calculations.
+
     The sandbox supports:
     - Basic Python syntax and operators (+, -, *, /, **, //, %)
     - math module (math.sqrt, math.pow, math.log, math.exp, math.ceil, math.floor, etc.)
     - Common builtins (abs, round, min, max, sum, len, sorted)
-    - statistics module (statistics.mean, statistics.median, statistics.stdev, etc.)
+    - NumPy functions: np_mean, np_std, np_median, np_var, np_min, np_max, np_sum,
+      np_percentile, np_diff, np_cumsum, np_cumprod, np_arange, np_linspace,
+      np_sqrt, np_exp, np_log, np_abs, np_round, np_dot, np_corrcoef,
+      np_argmax, np_argmin
+      (all accept Python lists or scalars and return Python floats/lists)
+    - Pandas functions: pd_series, pd_rolling_mean, pd_rolling_std,
+      pd_describe (returns dict with count/mean/std/min/25%/50%/75%/max),
+      pd_deduplicate (returns unique values), pd_value_counts (returns frequency dict),
+      np_histogram (returns counts and bin_edges)
+      (all accept Python lists and return JSON-serializable types)
 
     Execution flow:
     1. Call retrieve_batch (preferred when you need multiple years for one field)
@@ -827,7 +421,11 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
        percentage_change, difference): either compute directly in Python or use execute_python_code
     3. For compute steps: call execute_python_code with Python code that performs the full
        calculation using the retrieved values as literal numbers
-    4. Return the final answer as structured data.
+    4. For EDA / exploratory analysis questions, use the EDA tools (analyze_sheet,
+       find_missing_data, discover_column_types, get_sheet_shape, group_summary_stats,
+       create_pivot_table, crosstab_analysis, drop_missing_columns, convert_to_numerical,
+       correlation_analysis) to inspect the DataFrame directly.
+    5. Return the final answer as structured data.
 
     ### CRITICAL — step_results MUST be populated:
     The `step_results` field in your output MUST contain an entry for EVERY step in the plan,
@@ -867,6 +465,21 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
             extract_t,
             retrieve_batch_t,
             execute_python_code,
+            analyze_sheet,
+            find_missing_data,
+            discover_column_types,
+            get_sheet_shape,
+            group_summary_stats,
+            create_pivot_table,
+            crosstab_analysis,
+            drop_missing_columns,
+            convert_to_numerical,
+            correlation_analysis,
+            get_sheet_head,
+            get_sheet_info,
+            value_counts_analysis,
+            deduplicate_rows,
+            get_sheet_dtypes,
         ],
         model_settings={"temperature": 0.1},
         result_retries=2,
@@ -1082,7 +695,7 @@ def build_query_pipeline(
         with timed("planner", timings):
             plan_result = await planner.run(query)
         plan: QueryPlan = plan_result.data
-        print("📋 Plan:", json.dumps(plan.model_dump(), indent=2))
+        print("Plan:", json.dumps(plan.model_dump(), indent=2))
 
         # Emit classified intent + plan
         _emit("plan", {
@@ -1113,7 +726,7 @@ def build_query_pipeline(
             with timed("pre_populate", timings):
                 pre_populated = _prepopulate_retrievals(plan, deps)
             if pre_populated:
-                print(f"⚡ Pre-populated {len(pre_populated)} values: {pre_populated}")
+                print(f"Pre-populated {len(pre_populated)} values: {pre_populated}")
                 _emit("pre_populated", {"values": pre_populated})
 
         # ------------------------------------------------------------------
@@ -1142,7 +755,7 @@ def build_query_pipeline(
                 friendly_response="",  # filled in by _format_simple_response
             )
             _emit("status", {"message": "All values retrieved — preparing answer…"})
-            print("⚡ Skipped executor — pure retrieve plan.")
+            print("Skipped executor — pure retrieve plan.")
             try:
                 from result_cache import cache_step_results
                 cache_step_results(user_id, plan, execution)
@@ -1150,10 +763,10 @@ def build_query_pipeline(
                 print(f"⚠️ Post-execution caching failed: {e}")
             friendly = inject_disclaimer(_format_simple_response(query, plan, execution) or "")
             if friendly:
-                print(f"📝 Response: {friendly[:100]}...")
+                print(f"Response: {friendly[:100]}...")
             _emit("friendly", {"response": friendly})
             total = sum(timings.values())
-            print(f"⏱️  Pipeline total: {total:.2f}s | {timings}")
+            print(f"Pipeline total: {total:.2f}s | {timings}")
             _emit("done", {"timings": timings, "total": total})
             return {
                 "answer": execution.model_dump(),
@@ -1241,13 +854,13 @@ def build_query_pipeline(
             execution.friendly_response or _format_simple_response(query, plan, execution) or ""
         )
         if friendly:
-            print(f"📝 Response: {friendly[:100]}...")
+            print(f"Response: {friendly[:100]}...")
         else:
             print("⚠️ No friendly response generated")
         _emit("friendly", {"response": friendly})
 
         total = sum(timings.values())
-        print(f"⏱️  Pipeline total: {total:.2f}s | {timings}")
+        print(f"Pipeline total: {total:.2f}s | {timings}")
         _emit("done", {"timings": timings, "total": total})
         return {
             "answer": execution.model_dump(),
@@ -1286,7 +899,7 @@ def executing_plan_from_json(df: pd.DataFrame, json_str: str) -> dict[str, Any]:
     """
     try:
         parsed = json.loads(json_str)
-        print("🔨 Parsed JSON:", parsed)
+        print("Parsed JSON:", parsed)
 
         if "plan" in parsed:
             plan = parsed["plan"]
@@ -1302,7 +915,7 @@ def executing_plan_from_json(df: pd.DataFrame, json_str: str) -> dict[str, Any]:
         computed_values: dict[str, Any] = {}
 
         for step_name, instruction in plan.items():
-            print(f"🔧 Processing step {step_name}: {instruction}")
+            print(f"Processing step {step_name}: {instruction}")
 
             if isinstance(instruction, str):
                 instruction = instruction.strip()
@@ -1367,11 +980,11 @@ def executing_plan_from_json(df: pd.DataFrame, json_str: str) -> dict[str, Any]:
 
 
 def _legacy_retrieving(df: pd.DataFrame, items: list[str]) -> list[float | None]:
-    print(f"🔍 Attempting to retrieve: {items}")
+    print(f"Attempting to retrieve: {items}")
     if len(items) == 2:
         col, year = items[0].strip(), items[1].strip()
         print(
-            f"🔍 Looking for: '{col}' in index ({col in df.index}), "
+            f"Looking for: '{col}' in index ({col in df.index}), "
             f"'{year}' in columns ({year in df.columns})"
         )
         if col in df.index and year in df.columns:

@@ -484,7 +484,7 @@ async def query_rag(
                 )
             if cached_response is not None:
                 print(
-                    f"⚡ Semantic cache hit for user={user_id} "
+                    f"Semantic cache hit for user={user_id} "
                     f"(similarity={similarity:.3f}): '{query[:60]}'"
                 )
                 try:
@@ -617,7 +617,7 @@ async def query_rag(
             result.setdefault("user_id", user_id)
             # Surface per-stage timings so the front-end can display them.
             total = sum(timings.values())
-            print(f"⏱️  query_rag total: {total:.2f}s | {timings}")
+            print(f"query_rag total: {total:.2f}s | {timings}")
             result["timings"] = timings
         return result
     except Exception as e:

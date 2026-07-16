@@ -42,6 +42,199 @@ Railway Project
 
 ---
 
+## Storage Architecture
+
+### Overview
+
+The app uses a **three-tier storage model**: S3 for raw files, SQLite on a Railway volume for metadata + cache fallback, and Redis (Upstash) for hot cache. Each tier serves a different purpose and has different persistence guarantees.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Railway Container                            │
+│                                                                     │
+│  ┌─────────────────────────────────────────┐  ┌──────────────────┐ │
+│  │ Ephemeral Filesystem (wiped on redeploy) │  │ Volume Mount     │ │
+│  │                                          │  │ /app/data/       │ │
+│  │  /app/src/        ← Python source code   │  │  └── sheets.db   │ │
+│  │  /app/venv/       ← Python dependencies  │  │      (SQLite)    │ │
+│  │  /tmp/uploads/    ← Temp S3 downloads    │  │                  │ │
+│  │  ~/.cache/        ← HuggingFace model    │  │  Persistent      │ │
+│  │                     cache (SentenceTrfm) │  │  across redeploys│ │
+│  └─────────────────────────────────────────┘  └──────────────────┘ │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ In-Memory (lost on restart)                                   │   │
+│  │  _redis_client  ← TCP/TLS socket to Upstash Redis             │   │
+│  │  _model         ← SentenceTransformer (all-MiniLM-L6-v2)      │   │
+│  │  file_cache     ← pandas DataFrames for current query          │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+         │                              │
+         │ TCP/TLS (port 6379)          │ HTTPS (S3 API)
+         ▼                              ▼
+┌─────────────────────┐    ┌──────────────────────────────┐
+│ Upstash Redis       │    │ AWS S3 (ragsheets bucket)     │
+│ (external service)  │    │                               │
+│                     │    │ uploads/{uuid}/{filename}.xlsx│
+│ Key namespaces:     │    │                               │
+│  llm:{hash}         │    │ Lifecycle: 90-day expiry      │
+│  semantic:{user}:.. │    │                               │
+│  result:{user}:{key}│    │ Stores raw .xlsx files only   │
+│  sandbox:{user}:..  │    │ (1-50MB each)                 │
+│                     │    │                               │
+│ TTL: 7 days         │    │ Persistent (cloud storage)    │
+│ Pay-per-request     │    │                               │
+└─────────────────────┘    └──────────────────────────────┘
+```
+
+### Tier 1: AWS S3 — Raw Excel File Storage
+
+| Property | Value |
+|----------|-------|
+| **Bucket** | `ragsheets` (us-east-1) |
+| **Path pattern** | `uploads/{file_id}/{original_filename}.xlsx` |
+| **What's stored** | The original `.xlsx` files users upload (1-50MB each) |
+| **Persistence** | Cloud storage — survives all container restarts, redeploys, crashes |
+| **Lifecycle** | S3 lifecycle policy expires objects after 90 days |
+| **Access pattern** | Upload on file upload → download on query (streamed into pandas) |
+| **Cost** | ~$0.023/GB/month (S3 Standard) |
+
+S3 is the **source of truth for raw data**. When a user asks "What is revenue in 2022?", the backend downloads the relevant `.xlsx` from S3, loads it into a pandas DataFrame, runs the query, then discards the DataFrame. The file is never stored locally — it's streamed from S3 on demand.
+
+### Tier 2: SQLite — Metadata + Cache Fallback
+
+| Property | Value |
+|----------|-------|
+| **File** | `sheets.db` (single SQLite file) |
+| **Location** | `/app/data/sheets.db` (Railway volume mount) |
+| **Path config** | `DB_PATH` env var → defaults to `{DATA_DIR}/sheets.db` |
+| **What's stored** | File records, sheet metadata, LLM cache, result cache, threads, messages |
+| **Persistence** | Persistent via Railway volume — survives redeploys |
+| **Access pattern** | Direct file I/O via Python's `sqlite3` module (no network) |
+| **Size** | ~1KB per sheet record, ~2-5KB per cache entry (1GB volume = ~1M records) |
+
+SQLite stores **metadata about what's in S3**, not the Excel data itself. This is the "card catalog" — the app queries SQLite to find which sheets have "Revenue" as a field and "2022" as a year, then downloads only that sheet from S3.
+
+**Tables in `sheets.db`:**
+
+| Table | Purpose | Key columns |
+|-------|---------|-------------|
+| `files` | One row per uploaded file | `file_id`, `file_name`, `s3_key`, `sheet_count`, `user_id` |
+| `sheets` | One row per sheet within a file | `sheet_id`, `file_id`, `sheet_name`, `fields_json`, `years_json`, `user_description` |
+| `llm_cache` | Cached LLM responses + embeddings | `cache_key`, `response`, `model`, `user_id`, `embedding_json` |
+| `result_cache` | Cached intermediate pipeline results | `cache_key`, `user_id`, `value`, `cache_type`, `structured_key` |
+| `threads` | Conversation threads | `thread_id`, `user_id`, `title`, `created_at` |
+| `thread_sheets` | Sheets attached to a thread | `thread_id`, `sheet_id` |
+| `messages` | Q&A messages within threads | `message_id`, `thread_id`, `role`, `content`, `full_result` |
+
+**Why SQLite (not PostgreSQL)?**
+- Single file, zero operational overhead — no server, no connection pool, no network latency
+- Fast for low-traffic apps (capstone project)
+- Easy migration path: code uses raw SQL, swap `sqlite3` for `psycopg2` when needed
+- When to migrate: >5 concurrent users, multi-instance scaling, or automatic backups needed
+
+### Tier 3: Redis (Upstash) — Hot Cache
+
+| Property | Value |
+|----------|-------|
+| **Provider** | Upstash (serverless Redis, pay-per-request) |
+| **Connection** | `REDIS_URL` env var → TCP/TLS socket on port 6379 |
+| **What's stored** | LLM response cache, semantic vector cache, result cache, sandbox cache |
+| **Persistence** | External service — independent of Railway container lifecycle |
+| **TTL** | 7 days (auto-expiry, refreshed on access) |
+| **Access pattern** | Network call via `redis` Python library (shared singleton connection) |
+
+Redis is the **fast read path**. Every cache lookup checks Redis first (~0.1ms network to Upstash), then falls back to SQLite if Redis misses. Every cache write goes to **both** Redis and SQLite (dual-write) — Redis for speed, SQLite for durability.
+
+**5 Redis key namespaces:**
+
+| Key pattern | Cache layer | What it stores |
+|-------------|-------------|----------------|
+| `llm:{sha256}` | Exact-match LLM cache | Full LLM response for a (model, prompt) pair |
+| `semantic:{user_id}:{hash}` | Semantic cache | Query embedding + response (RediSearch vector index) |
+| `result:{user_id}:{key}` | Retrieve cache | Raw tool return values (field/year/sheet lookups) |
+| `sandbox:{user_id}:{hash}` | Sandbox cache | Python code execution results |
+| `{key}:hits` | Hit counter | Incremented on each cache hit (observability) |
+
+### Container Filesystem Layers
+
+The Railway container has three distinct storage zones with different lifecycles:
+
+```
+/app/                          ← Ephemeral (rebuilt from Docker image on each deploy)
+├── src/                       ← Python source code (from git)
+├── venv/                      ← Python dependencies (from pip install)
+├── uploads/                   ← Temp staging for file uploads (deleted after S3 upload)
+└── ...
+
+/tmp/                          ← Ephemeral (container RAM/disk, wiped on restart)
+└── uploads/                   ← S3 downloads during query processing (transient)
+
+/app/data/                     ← PERSISTENT VOLUME MOUNT
+└── sheets.db                  ← SQLite database (survives redeploys)
+
+~/.cache/huggingface/          ← Ephemeral (re-downloaded on each deploy)
+└── models--all-MiniLM-L6-v2/  ← SentenceTransformer model (~80MB)
+```
+
+**What happens on redeploy:**
+- `/app/src/`, `/app/venv/` → Rebuilt from Docker image (new code)
+- `/tmp/` → Wiped clean (fresh container)
+- `~/.cache/` → Wiped (model re-downloads on first query — ~5 seconds)
+- `/app/data/sheets.db` → **Preserved** (volume mount persists across container replacements)
+
+### Dual-Write Cache Strategy
+
+Every cache write goes to both Redis and SQLite. Every cache read checks Redis first, then SQLite:
+
+```
+Write path (e.g., cache_set):
+  1. Redis SETEX (key, ttl=7d, value)     ← fast, network to Upstash
+  2. SQLite INSERT OR REPLACE             ← durable, local file I/O
+  (both attempted; failures logged, never raised)
+
+Read path (e.g., cache_get):
+  1. Redis GET (key)                      ← ~0.1ms
+     ├─ HIT  → return value (refresh TTL, increment hit counter)
+     └─ MISS → fall through to SQLite
+  2. SQLite SELECT                        ← ~1ms local disk
+     ├─ HIT  → return value
+     └─ MISS → return None (cache miss, proceed to LLM call)
+```
+
+**Why dual-write?**
+- Redis is fast but ephemeral (Upstash could have outages, key eviction)
+- SQLite is durable but slower (disk I/O, single-writer lock)
+- Dual-write means either store can fail and the app still works
+- Redis is the **performance** layer; SQLite is the **durability** layer
+
+### Data Flow: Upload → Query → Cache
+
+```
+1. User uploads Excel file
+   → POST /api/upload/
+   → File saved to S3 (uploads/{uuid}/{filename}.xlsx)
+   → ExcelService.load_sheet_metadata_from_file() parses fields, years
+   → save_file() + save_sheet() → SQLite (metadata only)
+   → invalidate_user_cache() → Redis + SQLite cache cleared (stale data)
+
+2. User asks "What is revenue in 2022?"
+   → GET /api/query/stream?query=...&thread_id=...&sheet_ids=...
+   → embed_query(query) → 384-dim vector via SentenceTransformer
+   → find_similar_cached(user_id, embedding) → Redis FT.SEARCH (KNN)
+     ├─ HIT (similarity ≥ 0.88) → return cached response, persist to messages
+     └─ MISS → continue to pipeline
+   → Pipeline: plan → retrieve (S3 download) → compute → sandbox
+     ├─ result_cache_get() → Redis GET, SQLite fallback (per intermediate step)
+     └─ sandbox_cache_get() → Redis GET, SQLite fallback (per code block)
+   → store_cached() → Redis HSET + SQLite INSERT (semantic cache, dual-write)
+   → cache_step_results() → Redis SETEX + SQLite INSERT (structured keys)
+   → save_message() → SQLite only (thread persistence)
+   → SSE stream → frontend
+```
+
+---
+
 ## Phase 1: Code Changes (must do before deploying)
 
 ### 1.1 Fix frontend API URL — use relative path

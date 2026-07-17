@@ -430,3 +430,140 @@ def _parse_plan(cls, v):
 ### Verification
 
 Query 8 now succeeds: planner returns a valid dict plan, `retrieve_batch` is used for 5 years of Interest expense, executor computes year-over-year differences and identifies 2023 as the max increase year.
+
+---
+
+## Bug 16: New ChatGPT-Like UI Not Live on Deployed Site
+
+**Status:** Resolved
+**Date:** 2025-07-16
+**Severity:** High
+
+### Symptom
+
+The deployed site at `https://excel-chat-production-76dc.up.railway.app` showed the old 2-tab interface ("Upload & Describe" / "Query") instead of the new sidebar + threads + conversation layout designed in `plans/ui-update.md`.
+
+### Root Cause
+
+The git repo root is at `capstone/` (not `capstone/excel-chat/`). The repo contains **two copies** of the frontend:
+- `frontend/ragsheets/` (repo root level) — old 2-tab UI, last updated at commit `7078e85`
+- `excel-chat/frontend/ragsheets/` — new sidebar + threads UI, updated at commit `2b35299`
+
+Railway was configured with `rootDirectory: /` (repo root) and `dockerfilePath: backend/Dockerfile`. The Dockerfile's `COPY frontend/ragsheets/ ./` resolved to `capstone/frontend/ragsheets/` (the old copy), not `capstone/excel-chat/frontend/ragsheets/` (the new copy). So even though Railway deployed from the correct `agentic` branch with the correct commit, the Docker build context picked up the wrong frontend directory.
+
+### Fix
+
+Changed Railway's `rootDirectory` from `/` to `excel-chat/` via:
+```bash
+railway environment edit --service-config excel-chat source.rootDirectory "excel-chat"
+```
+
+This ensures the Dockerfile's `COPY frontend/ragsheets/ ./` resolves to `excel-chat/frontend/ragsheets/` — the directory with the new UI.
+
+### Verification
+
+Confirmed the new UI is live at `https://excel-chat-production-76dc.up.railway.app`:
+- Left sidebar with "Sheets" section (upload + file listing) and "Threads" section (new thread button)
+- Main content area: "Select a thread or create a new one to start asking questions."
+- No "Upload & Describe" / "Query" tabs
+
+---
+
+## Bug 17: Some Queries Return 0 or Incorrect Results Despite Non-Zero Data
+
+**Status:** Open
+**Date:** 2025-07-16
+**Severity:** High
+
+### Symptom
+
+When running queries through the full LLM pipeline, some questions return 0 or incorrect computed values even though the underlying DataFrame has non-zero data. The data-layer unit tests (`test_financial_questions.py`) all pass (56/56), confirming data retrieval and sandbox execution logic is correct in isolation. The bug manifests only in the LLM agent layer.
+
+### Root Cause
+
+Multiple contributing factors:
+
+**1. Exact-match field name lookup (primary cause)**
+
+`retrieve` in `tools.py:148` uses exact string matching against the DataFrame index:
+```python
+if field in df.index and year in df.columns:
+    val = df.loc[field, year]
+    result = str(float(val))
+else:
+    return f"ERROR: '{field}' or '{year}' not found in sheet '{sheet}'."
+```
+
+When the LLM planner generates a field name that doesn't exactly match the DataFrame index (e.g., "Capital expenditure" instead of "Capital", or "Interest" instead of "Interest expense"), `retrieve` returns an ERROR string. The executor LLM then receives this ERROR as a pre-populated value and may default to 0 in calculations.
+
+The planner's system prompt lists all available fields, but LLMs still sometimes generate paraphrased or truncated field names, especially for long names like "Property expense other than interest" or "To residents other than government units".
+
+**2. `-inf` values from `clean_dataframe` propagated to calculations**
+
+`clean_dataframe` in `excelservices.py:235` fills NaN values with `-np.inf`:
+```python
+df = df.fillna(-np.inf).reset_index(drop=True, inplace=False)
+```
+
+When `retrieve` fetches a field/year that has `-inf`, it returns the string `"-inf"`. The executor LLM may:
+- Fail to parse `"-inf"` as a number and default to 0
+- Use `-inf` in calculations, producing `NaN` (e.g., `-inf * 0 = NaN`)
+- Convert `NaN` to 0 in the final answer
+
+The field "Consumption of fixed capital" has `-inf` for years 2011–2021 in the example dataset. Any query touching this field will hit this issue.
+
+**3. `retrieve_batch` returns `null` for missing field/year combinations**
+
+In `tools.py:265`, `retrieve_batch` returns `None` (JSON `null`) for years where the field is not found:
+```python
+else:
+    result_obj[year] = None
+```
+
+When pre-populated and formatted for the executor prompt, this renders as:
+```
+step1: {"2018": 1500.0, "2019": null}
+```
+
+The executor LLM may interpret `null` as 0, producing incorrect averages, sums, or other aggregates.
+
+**4. No field name normalization or fuzzy matching**
+
+Neither `retrieve` nor `retrieve_batch` performs any case normalization, whitespace trimming, or fuzzy matching against the DataFrame index. A field name like "capital" (lowercase) or "Capital " (trailing space) will fail exact match even though "Capital" exists in the index.
+
+### Proposed Fix
+
+**A. Add fuzzy field name matching in `retrieve` and `retrieve_batch`:**
+```python
+def _normalize_field(field: str, df_index: pd.Index) -> str | None:
+    """Match a field name case-insensitively, with whitespace normalization."""
+    field_lower = field.strip().lower()
+    for idx_name in df_index:
+        if idx_name.strip().lower() == field_lower:
+            return idx_name
+    return None
+```
+
+Use this before the `field in df.index` check in both `retrieve` and `retrieve_batch`.
+
+**B. Replace `-inf` with an error in retrieval results:**
+
+In `retrieve`, check for `-inf` before converting to float:
+```python
+val = df.loc[field, year]
+if np.isinf(val) or np.isnan(val):
+    return f"ERROR: No data available for '{field}' in {year}."
+result = str(float(val))
+```
+
+Same check in `retrieve_batch`.
+
+**C. Filter out `null` values in `retrieve_batch` results:**
+
+Instead of returning `null` for missing years, omit the key entirely or return an explicit error string for that year.
+
+### Verification
+
+- Run the full pipeline test (`test_query_pipeline.py`) with queries that previously returned 0
+- Verify that queries involving "Consumption of fixed capital" no longer return 0 or NaN
+- Test with paraphrased field names (e.g., "capital" instead of "Capital") to confirm fuzzy matching works

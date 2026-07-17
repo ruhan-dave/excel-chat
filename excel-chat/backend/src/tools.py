@@ -145,6 +145,29 @@ class PipelineDeps:
 # Retrieval Tools
 # ============================================================================
 
+def _normalize_field(field: str, df_index: pd.Index) -> str | None:
+    """Match a field name case-insensitively with whitespace normalization.
+
+    Returns the actual index label if a match is found, otherwise None.
+    This handles LLM-generated field names that differ in case or whitespace
+    from the DataFrame index (e.g. "capital" → "Capital", "Interest " → "Interest expense").
+    """
+    field_lower = field.strip().lower()
+    for idx_name in df_index:
+        if idx_name.strip().lower() == field_lower:
+            return idx_name
+    return None
+
+
+def _is_valid_value(val: Any) -> bool:
+    """Return True if val is a finite, non-NaN number."""
+    try:
+        f = float(val)
+        return not (math.isinf(f) or math.isnan(f))
+    except (TypeError, ValueError):
+        return False
+
+
 def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
     """Retrieve a numeric value from the financial DataFrame(s).
 
@@ -168,8 +191,11 @@ def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = 
 
     if sheet and sheet in sheets:
         df = sheets[sheet]
-        if field in df.index and year in df.columns:
-            val = df.loc[field, year]
+        matched_field = _normalize_field(field, df.index)
+        if matched_field and year in df.columns:
+            val = df.loc[matched_field, year]
+            if not _is_valid_value(val):
+                return f"ERROR: No data available for '{matched_field}' in {year}."
             result = str(float(val))
         else:
             return f"ERROR: '{field}' or '{year}' not found in sheet '{sheet}'."
@@ -177,9 +203,11 @@ def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = 
         # Search across all sheets
         results = []
         for sheet_name, df in sheets.items():
-            if field in df.index and year in df.columns:
-                val = df.loc[field, year]
-                results.append(f"{sheet_name}: {float(val)}")
+            matched_field = _normalize_field(field, df.index)
+            if matched_field and year in df.columns:
+                val = df.loc[matched_field, year]
+                if _is_valid_value(val):
+                    results.append(f"{sheet_name}: {float(val)}")
 
         if results:
             result = "; ".join(results)
@@ -243,8 +271,11 @@ def retrieve_batch(
     result_obj: dict[str, Any] = {}
     if sheet and sheet in sheets:
         df = sheets[sheet]
+        matched_field = _normalize_field(field, df.index)
+        if matched_field is None:
+            return json.dumps({"error": f"Field '{field}' not found in sheet '{sheet}'."})
         for year in years:
-            cache_key = build_retrieve_key(field, year, sheet) if use_cache else None
+            cache_key = build_retrieve_key(matched_field, year, sheet) if use_cache else None
             if use_cache:
                 cached = result_cache_get(ctx.deps.user_id, cache_key)
                 if cached is not None:
@@ -253,16 +284,16 @@ def retrieve_batch(
                         continue
                     except (TypeError, ValueError):
                         pass  # fall through to DataFrame scan
-            if field in df.index and year in df.columns:
-                try:
-                    val = float(df.loc[field, year])
-                    result_obj[year] = val
+            if matched_field in df.index and year in df.columns:
+                val = df.loc[matched_field, year]
+                if _is_valid_value(val):
+                    result_obj[year] = float(val)
                     if use_cache:
-                        result_cache_set(ctx.deps.user_id, cache_key, str(val), cache_type="retrieve")
-                except (TypeError, ValueError):
-                    result_obj[year] = None
+                        result_cache_set(ctx.deps.user_id, cache_key, str(float(val)), cache_type="retrieve")
+                else:
+                    pass  # skip -inf/NaN years entirely
             else:
-                result_obj[year] = None
+                pass  # skip missing years entirely
     else:
         # Cross-sheet mode: group values by year → {sheet: value}.
         # NOTE: deliberately skip the cache read here. The retrieve cache key
@@ -273,16 +304,19 @@ def retrieve_batch(
         for year in years:
             matches: dict[str, float] = {}
             for sheet_name, df in sheets.items():
-                if field in df.index and year in df.columns:
-                    try:
-                        matches[sheet_name] = float(df.loc[field, year])
-                    except (TypeError, ValueError):
-                        continue
+                matched_field = _normalize_field(field, df.index)
+                if matched_field and matched_field in df.index and year in df.columns:
+                    val = df.loc[matched_field, year]
+                    if _is_valid_value(val):
+                        try:
+                            matches[sheet_name] = float(val)
+                        except (TypeError, ValueError):
+                            continue
             if matches:
                 # Single match → scalar; multiple → per-sheet dict.
                 result_obj[year] = next(iter(matches.values())) if len(matches) == 1 else matches
             else:
-                result_obj[year] = None
+                pass  # skip missing/invalid years entirely
 
     return json.dumps(result_obj)
 

@@ -1,88 +1,209 @@
 import './App.css'
-import { Card } from './components/ui/card'
-import SheetManager from './components/ui/sheetmanager'
-import PromptInput from './components/ui/promptinput'
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs"
-import { Table2, MessageSquareText } from "lucide-react"
+import { useState, useCallback, useEffect } from "react";
+import { Table2 } from "lucide-react";
+import { Sidebar } from "@/components/ui/sidebar";
+import { ThreadView } from "@/components/ui/thread-view";
+import { useSheets } from "@/hooks/useSheets";
+import { useThreads } from "@/hooks/useThreads";
+import { useConversation } from "@/hooks/useConversation";
+import { fetchThreadDetail, type SheetInfo } from "@/lib/api";
 
 function App() {
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100">
-      {/* Header */}
-      <header className="sticky top-0 z-50 border-b border-slate-200 bg-white/80 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-              <Table2 className="h-5 w-5 text-primary-foreground" />
+    const [query, setQuery] = useState("");
+    const [threadSheets, setThreadSheets] = useState<SheetInfo[]>([]);
+    const [selectedSheetIds, setSelectedSheetIds] = useState<Set<string>>(new Set());
+
+    // --- Sheets ---
+    const {
+        sheets,
+        files,
+        refetch: refetchSheets,
+        removeFile,
+        saveDescription,
+    } = useSheets();
+
+    // --- Threads ---
+    const {
+        threads,
+        activeThreadId,
+        selectThread,
+        createThread,
+        removeThread,
+        renameThread,
+        addSheetToThread,
+        removeSheetFromThread,
+        refetch: refetchThreads,
+    } = useThreads();
+
+    // --- Conversation ---
+    const {
+        messages,
+        isLoading: isStreaming,
+        streaming,
+        error,
+        sendMessage,
+    } = useConversation(activeThreadId, threadSheets, refetchThreads);
+
+    // Load thread sheets when active thread changes
+    useEffect(() => {
+        if (!activeThreadId) {
+            setThreadSheets([]);
+            setSelectedSheetIds(new Set());
+            return;
+        }
+        fetchThreadDetail(activeThreadId)
+            .then((detail) => {
+                setThreadSheets(detail.sheets);
+                setSelectedSheetIds(new Set(detail.sheets.map((s) => s.sheet_id)));
+            })
+            .catch((err) => {
+                console.error("Failed to load thread detail:", err);
+                setThreadSheets([]);
+                setSelectedSheetIds(new Set());
+            });
+    }, [activeThreadId]);
+
+    // --- Sheet selection handlers ---
+    const toggleSheet = useCallback(
+        (sheetId: string) => {
+            setSelectedSheetIds((prev) => {
+                const next = new Set(prev);
+                if (next.has(sheetId)) {
+                    next.delete(sheetId);
+                } else {
+                    next.add(sheetId);
+                }
+                return next;
+            });
+        },
+        []
+    );
+
+    const handleAddSheet = useCallback(
+        async (sheetId: string) => {
+            if (!activeThreadId) return;
+            const sheet = sheets.find((s) => s.sheet_id === sheetId);
+            if (!sheet) return;
+            setThreadSheets((prev) => [...prev, sheet]);
+            setSelectedSheetIds((prev) => new Set(prev).add(sheetId));
+            await addSheetToThread(activeThreadId, sheetId);
+        },
+        [activeThreadId, sheets, addSheetToThread]
+    );
+
+    const handleRemoveSheet = useCallback(
+        async (sheetId: string) => {
+            if (!activeThreadId) return;
+            setThreadSheets((prev) => prev.filter((s) => s.sheet_id !== sheetId));
+            setSelectedSheetIds((prev) => {
+                const next = new Set(prev);
+                next.delete(sheetId);
+                return next;
+            });
+            await removeSheetFromThread(activeThreadId, sheetId);
+        },
+        [activeThreadId, removeSheetFromThread]
+    );
+
+    // --- Thread handlers ---
+    const handleCreateThread = useCallback(async () => {
+        await createThread([]);
+    }, [createThread]);
+
+    const handleSelectThread = useCallback(
+        (threadId: string) => {
+            selectThread(threadId);
+            setQuery("");
+        },
+        [selectThread]
+    );
+
+    const handleDeleteThread = useCallback(
+        async (threadId: string) => {
+            await removeThread(threadId);
+        },
+        [removeThread]
+    );
+
+    const handleRenameThread = useCallback(
+        async (threadId: string, title: string) => {
+            await renameThread(threadId, title);
+        },
+        [renameThread]
+    );
+
+    // --- Query handler ---
+    const handleSendMessage = useCallback(
+        (q: string) => {
+            if (!activeThreadId) return;
+            sendMessage(q);
+            setQuery("");
+        },
+        [activeThreadId, sendMessage]
+    );
+
+    // Active thread title
+    const activeThread = threads.find((t) => t.thread_id === activeThreadId);
+    const threadTitle = activeThread?.title || "New Thread";
+
+    return (
+        <div className="flex h-screen flex-col bg-slate-50">
+            {/* Header */}
+            <header className="flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-4">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary">
+                    <Table2 className="h-4 w-4 text-primary-foreground" />
+                </div>
+                <span className="text-base font-bold tracking-tight">Excel Analyst</span>
+            </header>
+
+            {/* Main layout: sidebar + content */}
+            <div className="flex flex-1 overflow-hidden">
+                {/* Sidebar */}
+                <Sidebar
+                    sheets={sheets}
+                    files={files}
+                    threads={threads}
+                    selectedSheetIds={selectedSheetIds}
+                    activeThreadId={activeThreadId}
+                    onToggleSheet={toggleSheet}
+                    onRefetchSheets={refetchSheets}
+                    onRemoveFile={removeFile}
+                    onSaveDescription={saveDescription}
+                    onSelectThread={handleSelectThread}
+                    onCreateThread={handleCreateThread}
+                    onDeleteThread={handleDeleteThread}
+                    onRenameThread={handleRenameThread}
+                />
+
+                {/* Main content */}
+                <main className="flex-1 overflow-hidden">
+                    {activeThreadId ? (
+                        <ThreadView
+                            threadTitle={threadTitle}
+                            selectedSheets={threadSheets}
+                            allSheets={sheets}
+                            messages={messages}
+                            streaming={streaming}
+                            isLoading={isStreaming}
+                            error={error}
+                            onAddSheet={handleAddSheet}
+                            onRemoveSheet={handleRemoveSheet}
+                            onSendMessage={handleSendMessage}
+                            query={query}
+                            onQueryChange={setQuery}
+                        />
+                    ) : (
+                        <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                            <Table2 className="h-12 w-12 text-slate-300" />
+                            <p className="text-sm text-muted-foreground">
+                                Select a thread or create a new one to start asking questions.
+                            </p>
+                        </div>
+                    )}
+                </main>
             </div>
-            <span className="text-lg font-bold tracking-tight">Excel Analyst</span>
-          </div>
         </div>
-      </header>
-
-      {/* Main content */}
-      <main className="mx-auto max-w-5xl px-6 py-10">
-        {/* Hero */}
-        <div className="mb-10 text-center">
-          <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 lg:text-5xl">
-            Query your sheets in minutes
-          </h1>
-          <p className="mt-3 text-base text-muted-foreground">
-            Upload an Excel file, describe your sheets, and ask questions — the AI handles the rest.
-          </p>
-        </div>
-
-        {/* Tabs */}
-        <Tabs defaultValue="upload">
-          <TabsList className="grid w-full grid-cols-2 rounded-xl">
-            <TabsTrigger value="upload" className="flex items-center gap-2 rounded-xl py-2.5">
-              <Table2 className="h-4 w-4" />
-              Upload &amp; Describe
-            </TabsTrigger>
-            <TabsTrigger value="query" className="flex items-center gap-2 rounded-xl py-2.5">
-              <MessageSquareText className="h-4 w-4" />
-              Query
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="upload">
-            <Card className="p-6 sm:p-8">
-              <div className="mb-6">
-                <h2 className="text-xl font-semibold tracking-tight">
-                  Upload your Excel file and describe your sheets
-                </h2>
-                <p className="mt-1.5 text-sm text-muted-foreground">
-                  Upload an Excel file with multiple sheets. After upload, describe each
-                  sheet so the AI can better understand your data and perform cross-sheet
-                  calculations.
-                </p>
-              </div>
-              <SheetManager />
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="query">
-            <Card className="p-6 sm:p-8">
-              <div className="mb-6">
-                <h2 className="text-xl font-semibold tracking-tight">
-                  Have a question about your document?
-                </h2>
-                <p className="mt-1.5 text-sm text-muted-foreground">
-                  Ask anything about your uploaded data. The AI will analyze your sheets and provide answers with calculations.
-                </p>
-              </div>
-              <PromptInput />
-            </Card>
-          </TabsContent>
-        </Tabs>
-      </main>
-    </div>
-  )
+    );
 }
 
-export default App
+export default App;

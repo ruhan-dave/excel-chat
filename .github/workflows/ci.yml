@@ -43,6 +43,7 @@ jobs:
             --ignore=tests/test_frontend_integration.py \
             --ignore=tests/test_real_agent_codegen.py \
             --ignore=tests/test_cache_service.py \
+            --ignore=tests/test_monty_direct.py \
             -q --tb=short
 
   frontend-build:

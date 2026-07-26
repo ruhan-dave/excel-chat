@@ -131,7 +131,7 @@ def test_retrieve_batch_cross_sheet_returns_per_sheet_dict():
 
 
 def test_retrieve_batch_handles_missing_field():
-    """A missing field returns None for that year."""
+    """A missing field returns an error message."""
     from pipeline import retrieve_batch, PipelineDeps
     from types import SimpleNamespace
     import uuid
@@ -143,7 +143,7 @@ def test_retrieve_batch_handles_missing_field():
     )
     ctx = SimpleNamespace(deps=deps)
     result = json.loads(retrieve_batch(ctx, "DoesNotExist", ["2022"], sheet="Sheet1"))
-    assert result == {"2022": None}
+    assert "error" in result
 
 
 def test_retrieve_batch_empty_years_returns_empty_dict():

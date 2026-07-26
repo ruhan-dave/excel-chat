@@ -796,7 +796,116 @@ This deployment config follows the [12-Factor App](https://12factor.net) methodo
 |------|--------|----------|-----------|
 | `frontend/default.conf` | Add `proxy_read_timeout 120s` | **High** | Prevents 504 Gateway Timeout on long LLM queries |
 | `backend/src/semantic_cache.py` | Switch to `all-MiniLM-L6-v2` or skip model load | **High** | Prevents 30-min startup on first deploy (16GB model download) |
-| `backend/src/main.py` | Add `/health` endpoint | **Medium** | Enables Railway health checks and auto-restart on failure |
 | `backend/src/main.py` | Add temp file cleanup to `daily_cleanup()` | **Medium** | Prevents `/tmp` filling up with downloaded S3 files |
 | `backend/Dockerfile` | Add `--workers 2` to uvicorn CMD | **Low** | Improves concurrency (but SQLite single-writer limits benefit) |
 | `backend/src/main.py` | Replace `print()` with `logging` | **Low** | Structured logs are easier to search in Railway dashboard |
+
+---
+
+## CI/CD Pipeline
+
+### Overview
+
+The CI/CD pipeline uses **GitHub Actions** to automate testing, deployment, and monitoring. The pipeline ensures that only code passing all tests reaches production, and that the production service is continuously monitored for uptime.
+
+```
+Push to agentic branch
+  │
+  ▼
+┌─────────────────────────────────┐
+│  CI Workflow (ci.yml)           │
+│  ├── Backend Tests (pytest)     │
+│  └── Frontend Build (tsc+vite)  │
+└─────────────────────────────────┘
+  │ All jobs pass?
+  ├── No → ❌ Block deploy (Railway checkSuites)
+  └── Yes
+      ▼
+┌─────────────────────────────────┐
+│  Deploy Workflow (deploy.yml)   │
+│  ├── railway up --detach        │
+│  └── Health check /health       │
+└─────────────────────────────────┘
+  │
+  ▼
+┌─────────────────────────────────┐
+│  Monitor Workflow (monitor.yml) │
+│  Runs every 10 minutes          │
+│  ├── Check /health endpoint     │
+│  ├── Check frontend loads       │
+│  └── Create GitHub issue on fail│
+└─────────────────────────────────┘
+```
+
+### Workflows
+
+#### 1. CI (`ci.yml`) — Test & Build Gate
+
+**Triggers:** Push or PR to `agentic` branch.
+
+**Jobs:**
+- **Backend Tests**: Installs Python 3.12 + `backend/requirements.txt`, runs `pytest` excluding tests that require a running server (`test_query_pipeline`, `test_frontend_integration`), external API keys (`test_real_agent_codegen`), or Redis (`test_cache_service`).
+- **Frontend Build**: Installs Node 22, runs `npm ci`, `tsc --noEmit` (type check), and `npm run build` (Vite production build).
+
+**Concurrency:** Cancels in-progress CI runs for the same branch when a new push arrives.
+
+#### 2. Deploy (`deploy.yml`) — Deploy on Green
+
+**Trigger:** `workflow_run` on CI workflow completion — fires only when CI succeeds on `agentic`.
+
+**Steps:**
+1. Checks out the exact commit that CI validated (`github.event.workflow_run.head_sha`).
+2. Installs Railway CLI.
+3. Runs `railway up --detach` to deploy to Railway production.
+4. Polls `/health` endpoint for up to 2.5 minutes (10 attempts × 15s) to confirm the deployment is live.
+
+**Required GitHub Secrets:**
+- `RAILWAY_TOKEN` — Railway API token (generate at railway.app → Account Settings → API Tokens)
+- `RAILWAY_PROJECT_ID` — Railway project ID (find in `railway status --json`)
+
+#### 3. Monitor (`monitor.yml`) — Continuous Health Checks
+
+**Triggers:** Every 10 minutes via `cron`, or manual dispatch.
+
+**Steps:**
+1. Checks `https://excel-chat-production-76dc.up.railway.app/health` for HTTP 200.
+2. Checks `https://excel-chat-production-76dc.up.railway.app` (frontend) for HTTP 200.
+3. If either fails, creates a GitHub issue labeled `monitoring` + `production-down` (deduplicated — won't create duplicate issues if one is already open).
+
+### Railway Configuration Changes
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `source.rootDirectory` | `excel-chat` | Ensures Dockerfile paths resolve to the correct subdirectory |
+| `source.checkSuites` | `true` | Railway waits for GitHub Actions CI to pass before auto-deploying |
+| `deploy.healthcheckPath` | `/health` | Railway polls this path after deploy; auto-restarts on failure |
+
+### Setup Instructions
+
+1. **Add GitHub Secrets:**
+   - Go to repo Settings → Secrets and variables → Actions → New repository secret
+   - `RAILWAY_TOKEN`: Generate at railway.app → Account Settings → API Tokens
+   - `RAILWAY_PROJECT_ID`: Run `railway status --json` locally, copy the project ID
+
+2. **Verify Railway settings:**
+   ```bash
+   railway status --json  # Confirm rootDirectory=excel-chat, checkSuites=true
+   ```
+
+3. **Test the pipeline:**
+   - Push a small change to `agentic` branch
+   - Watch GitHub Actions tab — CI should run, then Deploy should trigger
+   - Check Monitor workflow runs on schedule
+
+### Excluded Tests (CI)
+
+These tests are excluded from CI because they require external services:
+
+| Test File | Reason |
+|-----------|--------|
+| `test_query_pipeline.py` | Requires running backend server on localhost:8000 |
+| `test_frontend_integration.py` | Requires running frontend + backend |
+| `test_real_agent_codegen.py` | Requires `OPENROUTER_API_KEY` for live LLM calls |
+| `test_cache_service.py` | Requires Redis instance |
+
+These tests can be run locally with the appropriate services running.

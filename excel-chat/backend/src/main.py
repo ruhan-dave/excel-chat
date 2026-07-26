@@ -138,6 +138,16 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 # ============================================================================
+# Health Check
+# ============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Lightweight health endpoint for CI/CD and uptime monitoring."""
+    return {"status": "ok", "service": "excel-chat"}
+
+
+# ============================================================================
 # File Upload (S3 + Multi-Sheet)
 # ============================================================================
 

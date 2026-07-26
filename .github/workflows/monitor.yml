@@ -1,0 +1,70 @@
+name: Monitor
+
+on:
+  schedule:
+    # Every 10 minutes
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  health-check:
+    name: Production Health Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check health endpoint
+        id: health
+        run: |
+          URL="https://excel-chat-production-76dc.up.railway.app/health"
+          RESPONSE=$(curl -s -w "\n%{http_code}" "$URL" || true)
+          BODY=$(echo "$RESPONSE" | head -1)
+          CODE=$(echo "$RESPONSE" | tail -1)
+          echo "status_code=$CODE" >> $GITHUB_OUTPUT
+          echo "body=$BODY" >> $GITHUB_OUTPUT
+          echo "HTTP $CODE — $BODY"
+
+      - name: Check frontend loads
+        id: frontend
+        run: |
+          URL="https://excel-chat-production-76dc.up.railway.app"
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+          echo "status_code=$CODE" >> $GITHUB_OUTPUT
+          echo "Frontend HTTP $CODE"
+
+      - name: Fail if unhealthy
+        if: ${{ steps.health.outputs.status_code != '200' || steps.frontend.outputs.status_code != '200' }}
+        run: |
+          echo "❌ Health check failed!"
+          echo "Backend: HTTP ${{ steps.health.outputs.status_code }}"
+          echo "Frontend: HTTP ${{ steps.frontend.outputs.status_code }}"
+          exit 1
+
+      - name: Create issue on failure
+        if: ${{ failure() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueTitle = '🚨 Production health check failed';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['monitoring', 'production-down']
+            });
+            if (existing.data.length > 0) {
+              console.log('Issue already exists, skipping creation');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: [
+                'Production health check failed at ' + new Date().toISOString(),
+                '',
+                'Check https://excel-chat-production-76dc.up.railway.app/health',
+                '',
+                'Run: https://github.com/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId
+              ].join('\n'),
+              labels: ['monitoring', 'production-down']
+            });

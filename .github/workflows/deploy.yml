@@ -1,0 +1,54 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [agentic]
+
+jobs:
+  deploy:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'agentic' }}
+    defaults:
+      run:
+        working-directory: excel-chat
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up --service excel-chat \
+            --project ${{ secrets.RAILWAY_PROJECT_ID }} \
+            --environment production \
+            --detach \
+            -m "Deploy ${GITHUB_SHA::7} via CI/CD"
+
+      - name: Wait for deployment to be live
+        timeout-minutes: 5
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          sleep 30
+          HEALTH_URL="https://excel-chat-production-76dc.up.railway.app/health"
+          for i in $(seq 1 10); do
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || true)
+            if [ "$RESPONSE" = "200" ]; then
+              echo "✅ Health check passed (HTTP 200)"
+              curl -s "$HEALTH_URL"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $RESPONSE — retrying in 15s..."
+            sleep 15
+          done
+          echo "❌ Health check failed after 10 attempts"
+          exit 1

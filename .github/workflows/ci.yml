@@ -90,7 +90,7 @@ jobs:
 
       - name: Deploy to Railway
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
         run: |
           railway up --service excel-chat \
             --project ${{ secrets.RAILWAY_PROJECT_ID }} \

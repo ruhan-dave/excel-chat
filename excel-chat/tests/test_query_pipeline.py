@@ -1,86 +1,123 @@
 #!/usr/bin/env python3
 """
-Test script for the query pipeline with real data
+Integration tests for the query pipeline against a running backend.
+
+Requires:
+  - Backend running at http://127.0.0.1:8000
+  - OPENROUTER_API_KEY set (for real LLM calls)
+  - Example Excel file at example_sheets/Detailed_Expense_Breakdown.xlsx
 """
 
 import requests
 import json
-import pandas as pd
+import time
 from pathlib import Path
-import sys
-import os
 
-# Add the backend src directory to the path
-sys.path.append(str(Path(__file__).parent.parent / "backend" / "src"))
+import pytest
 
-from excelservices import ExcelService
+BASE_URL = "http://127.0.0.1:8000"
+EXCEL_FILE = Path(__file__).parent.parent / "example_sheets" / "Detailed_Expense_Breakdown.xlsx"
 
-def test_query_pipeline():
-    """Test the query pipeline with sample queries"""
-    
-    # Base URL for the backend API
-    base_url = "http://127.0.0.1:8000/api"
-    
-    # Test queries
-    test_queries = [
-        "How much did I spend on wages and salaries in 2022 and 2023?",
-        "What percentage of grants are from public sources?"
-    ]
-    
-    print("🧪 Testing Query Pipeline")
-    print("=" * 50)
-    
-    # First, let's check what data is available
-    try:
-        excel_file = Path(__file__).parent.parent / "example_sheets" / "Detailed_Expense_Breakdown.xlsx"
-        if excel_file.exists():
-            df = pd.read_excel(excel_file)
-            cleaned_df = ExcelService.clean_dataframe(df)
-            print(f"📊 Available fields: {cleaned_df.index.tolist()}")
-            print(f"📅 Available years: {cleaned_df.columns.tolist()}")
-            print()
-        else:
-            print(f"❌ Excel file not found: {excel_file}")
-            return
-    except Exception as e:
-        print(f"❌ Error loading Excel file: {e}")
-        return
-    
-    # Test each query
-    for i, query in enumerate(test_queries, 1):
-        print(f"🔍 Test {i}: {query}")
-        print("-" * 40)
-        
+
+def _wait_for_backend(timeout=30):
+    """Poll /health until the backend is ready."""
+    for _ in range(timeout):
         try:
-            # Make the API call
-            response = requests.get(f"{base_url}/query", params={"query": query})
-            
-            if response.status_code == 200:
-                result = response.json()
-                print("✅ Response received:")
-                print(json.dumps(result, indent=2))
-                
-                # Check if we got a valid answer
-                if "answer" in result:
-                    answer = result["answer"]
-                    if answer and any(v is not None for v in answer.values()):
-                        print("✅ Query processed successfully")
-                    else:
-                        print("⚠️ Query returned null/empty values")
-                elif "error" in result:
-                    print(f"❌ Error in response: {result['error']}")
-                    
-            else:
-                print(f"❌ HTTP Error {response.status_code}: {response.text}")
-                
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Request failed: {e}")
-        except json.JSONDecodeError as e:
-            print(f"❌ JSON decode error: {e}")
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
-        
-        print()
+            r = requests.get(f"{BASE_URL}/health", timeout=2)
+            if r.status_code == 200:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(1)
+    return False
 
-if __name__ == "__main__":
-    test_query_pipeline()
+
+def _upload_excel(user_id="ci-test"):
+    """Upload the example Excel file and return the response."""
+    with open(EXCEL_FILE, "rb") as f:
+        r = requests.post(
+            f"{BASE_URL}/upload/",
+            files={"excelFile": (EXCEL_FILE.name, f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            headers={"X-User-ID": user_id},
+            timeout=60,
+        )
+    return r
+
+
+@pytest.fixture(scope="module")
+def backend_ready():
+    """Ensure backend is running and responsive."""
+    if not _wait_for_backend():
+        pytest.skip("Backend not running at http://127.0.0.1:8000")
+    return True
+
+
+@pytest.fixture(scope="module")
+def uploaded_data(backend_ready):
+    """Upload the example Excel file once for all tests in this module."""
+    if not EXCEL_FILE.exists():
+        pytest.skip(f"Example file not found: {EXCEL_FILE}")
+    r = _upload_excel()
+    assert r.status_code == 200, f"Upload failed: {r.status_code} {r.text}"
+    data = r.json()
+    assert "file_id" in data, f"Unexpected upload response: {data}"
+    return data
+
+
+def test_health_endpoint(backend_ready):
+    """Backend /health returns 200 with status ok."""
+    r = requests.get(f"{BASE_URL}/health", timeout=5)
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_upload_succeeds(uploaded_data):
+    """Uploading the example Excel file returns sheet metadata."""
+    assert "sheets" in uploaded_data
+    assert len(uploaded_data["sheets"]) > 0
+
+
+def test_query_wages_and_salaries(uploaded_data):
+    """Query for wages and salaries returns a non-empty answer."""
+    r = requests.get(
+        f"{BASE_URL}/query",
+        params={"query": "How much did I spend on wages and salaries in 2022?"},
+        headers={"X-User-ID": "ci-test"},
+        timeout=60,
+    )
+    assert r.status_code == 200, f"Query failed: {r.status_code} {r.text}"
+    result = r.json()
+    assert "answer" in result or "friendly" in result or "result" in result, f"Unexpected response: {result}"
+
+
+def test_query_percentage_calculation(uploaded_data):
+    """Query for percentage of public grants returns a non-empty answer."""
+    r = requests.get(
+        f"{BASE_URL}/query",
+        params={"query": "What percentage of grants are from public sources?"},
+        headers={"X-User-ID": "ci-test"},
+        timeout=60,
+    )
+    assert r.status_code == 200, f"Query failed: {r.status_code} {r.text}"
+    result = r.json()
+    assert "answer" in result or "friendly" in result or "result" in result, f"Unexpected response: {result}"
+
+
+def test_query_stream_endpoint(uploaded_data):
+    """SSE streaming endpoint returns a stream of events."""
+    r = requests.get(
+        f"{BASE_URL}/query/stream",
+        params={"query": "What were the wages and salaries in 2022?", "thread_id": ""},
+        headers={"X-User-ID": "ci-test"},
+        stream=True,
+        timeout=60,
+    )
+    assert r.status_code == 200
+    # Read first few chunks to confirm SSE stream is active
+    chunks = []
+    for line in r.iter_lines(decode_unicode=True):
+        if line:
+            chunks.append(line)
+        if len(chunks) >= 5:
+            break
+    assert len(chunks) > 0, "No SSE events received"

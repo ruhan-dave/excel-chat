@@ -1,120 +1,92 @@
+#!/usr/bin/env python3
 """
-Test the actual LLM agent generating Python code for vague prompts.
+Test the actual LLM agent generating Python code for real queries.
+
+Uses real OpenRouter API calls (requires OPENROUTER_API_KEY).
+Tests that the planner + executor pipeline produces valid results for
+financial questions against the example Excel file.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
-# Add the backend/src directory to the path
+import pandas as pd
+import pytest
+
 backend_src = Path(__file__).parent.parent / "backend" / "src"
 sys.path.insert(0, str(backend_src))
 
-import os
-import pandas as pd
 from dotenv import load_dotenv
-from pipeline import build_query_pipeline
 
-# Load environment variables
 load_dotenv()
 
-# Set the required environment variable for pydantic-ai
-os.environ["OPENAI_API_KEY"] = os.environ.get("OPENROUTER_API_KEY")
+os.environ["OPENAI_API_KEY"] = os.environ.get("OPENROUTER_API_KEY", "")
+
+from excelservices import ExcelService
+from sheet_metadata import SheetMeta
+from pipeline import build_query_pipeline
+from llama_index.core.prompts import PromptTemplate
+
+EXCEL_FILE = Path(__file__).parent.parent / "example_sheets" / "Detailed_Expense_Breakdown.xlsx"
 
 
-def test_real_agent_code_generation():
-    """
-    Test if the actual LLM agent can generate Python code for vague prompts
-    and execute it through the sandbox.
-    """
-    print("=" * 60)
-    print("Testing real LLM agent code generation")
-    print("=" * 60 + "\n")
-    
-    # Load the Excel file for testing
-    excel_path = "/Users/ruhwang/Desktop/AI/spring2025_courses/capstone/excel-chat/example_sheets/Detailed_Expense_Breakdown.xlsx"
-    df = pd.read_excel(excel_path, index_col=0)
-    
-    print("Test DataFrame:")
-    print(df.head(10))
-    print(f"\nShape: {df.shape}")
-    print()
-    
-    # Build the pipeline with correct signature
-    sheets = {"Sheet1": df}
-    sheet_metas = []
-    from llama_index.core.prompts import PromptTemplate
+def _build_pipeline():
+    """Build a query pipeline from the example Excel file."""
+    df = pd.read_excel(EXCEL_FILE, index_col=0)
+    cleaned = ExcelService.clean_dataframe(df)
+    sheets = {"Sheet1": cleaned}
+
+    fields = list(cleaned.index.astype(str))
+    years = [str(c) for c in cleaned.columns]
+
+    meta = SheetMeta(
+        sheet_id="test-sheet",
+        file_id="test-file",
+        file_name=EXCEL_FILE.name,
+        sheet_name="Sheet1",
+        s3_key="test/key",
+        fields=fields,
+        years=years,
+        row_count=len(cleaned),
+    )
     template = PromptTemplate("Query: {query}\n\nSheet context: {sheet_context}")
-    pipeline = build_query_pipeline(None, sheets, sheet_metas, template)
-    
-    # Test 1: Vague prompt for CAGR calculation
-    print("Test 1: Vague prompt for CAGR calculation")
-    print("-" * 60)
-    prompt1 = "What's the compound annual growth rate of revenue from 2020 to 2023?"
-    print(f"Prompt: {prompt1}\n")
-    
-    try:
-        result1 = asyncio.run(pipeline(prompt1))
-        print(f"Result: {result1}")
-        print()
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        print()
-    
-    # Test 2: Vague prompt for trend analysis
-    print("Test 2: Vague prompt for trend analysis")
-    print("-" * 60)
-    prompt2 = "Analyze the profit margin trend across all years"
-    print(f"Prompt: {prompt2}\n")
-    
-    try:
-        result2 = asyncio.run(pipeline(prompt2))
-        print(f"Result: {result2}")
-        print()
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        print()
-    
-    # Test 3: Vague prompt requiring custom calculation
-    print("Test 3: Vague prompt for custom calculation")
-    print("-" * 60)
-    prompt3 = "Calculate the average revenue growth rate year over year"
-    print(f"Prompt: {prompt3}\n")
-    
-    try:
-        result3 = asyncio.run(pipeline(prompt3))
-        print(f"Result: {result3}")
-        print()
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        print()
-    
-    # Test 4: Very vague prompt
-    print("Test 4: Very vague prompt about efficiency")
-    print("-" * 60)
-    prompt4 = "How efficient is the business becoming over time?"
-    print(f"Prompt: {prompt4}\n")
-    
-    try:
-        result4 = asyncio.run(pipeline(prompt4))
-        print(f"Result: {result4}")
-        print()
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        print()
-    
-    print("=" * 60)
-    print("Real agent code generation test complete")
-    print("=" * 60)
+    return build_query_pipeline(None, sheets, [meta], template)
 
 
-if __name__ == "__main__":
-    test_real_agent_code_generation()
+@pytest.fixture(scope="module")
+def pipeline():
+    if not EXCEL_FILE.exists():
+        pytest.skip(f"Example file not found: {EXCEL_FILE}")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        pytest.skip("OPENROUTER_API_KEY not set")
+    return _build_pipeline()
+
+
+def test_cagr_calculation(pipeline):
+    """Agent can compute compound annual growth rate of revenue."""
+    result = asyncio.run(pipeline("What's the compound annual growth rate of revenue from 2020 to 2023?"))
+    assert result is not None
+    assert isinstance(result, dict)
+
+
+def test_trend_analysis(pipeline):
+    """Agent can analyze profit margin trends."""
+    result = asyncio.run(pipeline("Analyze the profit margin trend across all years"))
+    assert result is not None
+    assert isinstance(result, dict)
+
+
+def test_average_growth_rate(pipeline):
+    """Agent can calculate average year-over-year revenue growth."""
+    result = asyncio.run(pipeline("Calculate the average revenue growth rate year over year"))
+    assert result is not None
+    assert isinstance(result, dict)
+
+
+def test_efficiency_analysis(pipeline):
+    """Agent can handle vague prompts about business efficiency."""
+    result = asyncio.run(pipeline("How efficient is the business becoming over time?"))
+    assert result is not None
+    assert isinstance(result, dict)

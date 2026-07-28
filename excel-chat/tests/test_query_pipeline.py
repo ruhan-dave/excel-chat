@@ -60,6 +60,19 @@ def uploaded_data(backend_ready):
     r = _upload_excel()
     assert r.status_code == 200, f"Upload failed: {r.status_code} {r.text}"
     data = r.json()
+
+    # If sensitive data is detected, confirm with sanitize action
+    if data.get("sensitive_data_detected"):
+        pending_id = data["pending_upload_id"]
+        r2 = requests.post(
+            f"{BASE_URL}/upload/confirm",
+            params={"pending_upload_id": pending_id, "action": "sanitize"},
+            headers={"X-User-ID": "ci-test"},
+            timeout=60,
+        )
+        assert r2.status_code == 200, f"Confirm failed: {r2.status_code} {r2.text}"
+        data = r2.json()
+
     assert "file_id" in data, f"Unexpected upload response: {data}"
     return data
 

@@ -317,6 +317,8 @@ def test_upload_endpoint_invalidates_user_semantic_cache(
 
     # Stub the upload pipeline so we don't hit S3 or pandas.
     from fastapi import UploadFile
+    import excelservices
+    import guardrails
 
     async def _noop(*args, **kwargs):
         return None
@@ -337,11 +339,27 @@ def test_upload_endpoint_invalidates_user_semantic_cache(
         @staticmethod
         def auto_describe_all_sheets(*a, **k):
             return None
+        @staticmethod
+        def load_all_sheets(*a, **k):
+            return {}
 
+    # Patch ExcelService at the source module (create_upload_file does a
+    # local `from excelservices import ExcelService as _ES`).
+    monkeypatch.setattr(excelservices, "ExcelService", _FakeService)
     monkeypatch.setattr(main, "ExcelService", _FakeService)
     monkeypatch.setattr(main, "upload_to_s3", lambda *a, **k: None)
     monkeypatch.setattr(main, "save_file", lambda *a, **k: None)
     monkeypatch.setattr(main, "save_sheet", lambda *a, **k: None)
+
+    # Bypass guardrail checks for the fake empty file.
+    from guardrails import GuardrailResult
+    _ok = GuardrailResult(allowed=True, reason="", message="", category="")
+    monkeypatch.setattr(guardrails, "validate_file_upload", lambda *a, **k: _ok)
+    monkeypatch.setattr(main, "validate_file_upload", lambda *a, **k: _ok)
+    monkeypatch.setattr(
+        main, "detect_sensitive_data_in_dataframe",
+        lambda df: (False, []),
+    )
 
     # Run the endpoint as an async function.
     result = _maybe_await(

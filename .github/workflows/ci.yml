@@ -42,9 +42,6 @@ jobs:
             --ignore=tests/test_query_pipeline.py \
             --ignore=tests/test_frontend_integration.py \
             --ignore=tests/test_real_agent_codegen.py \
-            --ignore=tests/test_cache_service.py \
-            --ignore=tests/test_monty_direct.py \
-            --deselect tests/test_semantic_cache.py::test_upload_endpoint_invalidates_user_semantic_cache \
             -q --tb=short
 
   frontend-build:

@@ -111,7 +111,7 @@ def test_cache_get_returns_redis_value_and_refreshes_ttl(monkeypatch):
 
 
 def test_cache_get_returns_none_on_redis_miss(monkeypatch):
-    """When Redis returns None, cache_get must return None (no SQLite call)."""
+    """When Redis returns None, cache_get falls through to SQLite which also misses."""
     import cache_service
 
     r = _make_redis_mock()
@@ -119,12 +119,12 @@ def test_cache_get_returns_none_on_redis_miss(monkeypatch):
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
 
     with patch("cache_service.redis.from_url", return_value=r):
-        with patch("sheet_metadata.get_cached_response") as sqlite_get:
+        with patch("sheet_metadata.get_cached_response", return_value=None) as sqlite_get:
             result = cache_service.cache_get("gpt-4", "hello")
 
     assert result is None
-    sqlite_get.assert_not_called()
-    # No expire/incr on a miss.
+    sqlite_get.assert_called_once()
+    # No expire/incr on a Redis miss.
     r.expire.assert_not_called()
     r.incr.assert_not_called()
 

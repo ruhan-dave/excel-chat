@@ -51,6 +51,20 @@ jobs:
       run:
         working-directory: excel-chat
 
+    services:
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: test
+          MINIO_ROOT_PASSWORD: testtest
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -67,11 +81,26 @@ jobs:
           pip install -r backend/requirements.txt
           pip install pytest pytest-asyncio requests
 
+      - name: Create S3 bucket in MinIO
+        run: |
+          pip install minio
+          python3 -c "
+          from minio import Minio
+          c = Minio('127.0.0.1:9000', access_key='test', secret_key='testtest', secure=False)
+          if not c.bucket_exists('ragsheets'):
+              c.make_bucket('ragsheets')
+          print('MinIO bucket created')
+          "
+
       - name: Start backend server
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
           OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          S3_ENDPOINT_URL: http://127.0.0.1:9000
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: testtest
+          AWS_DEFAULT_REGION: us-east-1
         run: |
           cd backend/src
           uvicorn main:app --host 127.0.0.1 --port 8000 &
@@ -91,6 +120,10 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          S3_ENDPOINT_URL: http://127.0.0.1:9000
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: testtest
+          AWS_DEFAULT_REGION: us-east-1
         run: |
           pytest tests/test_query_pipeline.py tests/test_frontend_integration.py \
             -v --tb=short

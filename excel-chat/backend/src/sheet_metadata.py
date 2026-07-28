@@ -233,6 +233,15 @@ def init_db() -> None:
 # ============================================================================
 
 def _get_s3_client():
+    endpoint = os.environ.get("S3_ENDPOINT_URL")
+    if endpoint:
+        return boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", "test"),
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "test"),
+            region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        )
     return boto3.client("s3")
 
 

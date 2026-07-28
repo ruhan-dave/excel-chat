@@ -8,12 +8,19 @@ Requires:
   - Example Excel file at example_sheets/Detailed_Expense_Breakdown.xlsx
 """
 
+import os
 import requests
 import json
 import time
 from pathlib import Path
 
 import pytest
+
+# Set fake AWS credentials BEFORE importing anything that uses boto3.
+# In CI, moto intercepts boto3 calls; locally, real AWS creds are used.
+os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 BASE_URL = "http://127.0.0.1:8000"
 EXCEL_FILE = Path(__file__).parent.parent / "example_sheets" / "Detailed_Expense_Breakdown.xlsx"

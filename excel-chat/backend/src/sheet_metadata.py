@@ -242,7 +242,12 @@ def _get_s3_client():
             aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "test"),
             region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         )
-    return boto3.client("s3")
+    return boto3.client(
+        "s3",
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+    )
 
 
 def upload_to_s3(file_path: str, s3_key: str) -> None:

@@ -278,3 +278,31 @@ When the planner agent fails validation (`Exceeded maximum retries (3) for resul
 2. **Backend**: Map the opaque `Exceeded maximum retries` error to a user-friendly message: "The AI model could not process this query. Please try rephrasing your question."
 
 **Files:** `frontend/ragsheets/src/components/ui/promptinput.tsx`, `backend/src/main.py`
+
+---
+
+## Bug 12: Sanitized Upload Returns 0 Sheets (S3 Re-parse Fails)
+
+**Status:** Fixed (`05395f6`)
+**Date:** 2026-07-30
+**Severity:** High
+
+### Symptom
+
+When a user uploads an Excel file containing sensitive data (e.g. SSNs), the sensitive-data sanitize path writes the cleaned DataFrame to a new Excel file and uploads it to S3. On re-parse (during `_finalize_upload` and later during query via `read_excel_from_s3`), `clean_dataframe` can't find a year row, resulting in 0 sheets. Integration tests fail with `assert 0 > 0` and queries return "No sheets uploaded."
+
+### Root Cause
+
+Two compounding issues:
+
+1. **`main.py` confirm_upload**: After sanitizing, the cleaned DataFrame (with `category` as index and year strings as columns) was written to Excel with `index=False`. This discarded the category index, so when re-read by `pd.read_excel`, the first column became an unnamed integer index — no longer recognizable as a category column.
+
+2. **`excelservices.py` load_all_sheets / load_all_sheets_buffer**: Only attempted `clean_dataframe`, which expects raw metadata rows above a year row. If the DataFrame was already cleaned (category index + year columns), `clean_dataframe` raised `ValueError("No year row found")` and the sheet was silently skipped.
+
+### Fix
+
+1. **`main.py:298`**: Changed `df.to_excel(writer, sheet_name=sheet_name, index=False)` to `index=True` so the category index is preserved in the Excel file.
+
+2. **`excelservices.py:47-62`**: Added `_try_clean` helper that attempts `clean_dataframe` and falls back to returning the raw DataFrame if it's already cleaned (detected by checking for a `category` column or index). Applied to both `load_all_sheets` and `load_all_sheets_buffer`.
+
+**Files:** `excel-chat/backend/src/main.py`, `excel-chat/backend/src/excelservices.py`

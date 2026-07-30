@@ -45,6 +45,23 @@ class ExcelService:
     # ========================================================================
 
     @staticmethod
+    def _try_clean(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
+        """Attempt to clean a DataFrame; return None if cleaning fails.
+
+        If clean_dataframe raises ValueError (e.g. no year row found),
+        check whether the DataFrame is already cleaned (has a 'category'
+        column or index with year-like columns) and return it as-is.
+        """
+        try:
+            return ExcelService.clean_dataframe(df)
+        except ValueError:
+            if df.index.name == 'category' or 'category' in df.columns:
+                if 'category' in df.columns:
+                    df = df.set_index('category')
+                return df
+            return None
+
+    @staticmethod
     def load_all_sheets(filepath: str) -> dict[str, pd.DataFrame]:
         """
         Load all sheets from an Excel file and clean each one.
@@ -56,11 +73,11 @@ class ExcelService:
         raw_sheets = pd.read_excel(filepath, sheet_name=None)
         cleaned: dict[str, pd.DataFrame] = {}
         for name, df in raw_sheets.items():
-            try:
-                cleaned_df = ExcelService.clean_dataframe(df)
-                cleaned[name] = cleaned_df
-            except (ValueError, Exception) as e:
-                print(f"⚠️ Skipping sheet '{name}': {e}")
+            result = ExcelService._try_clean(df, name)
+            if result is not None:
+                cleaned[name] = result
+            else:
+                print(f"⚠️ Skipping sheet '{name}': No year row found and not pre-cleaned")
         return cleaned
 
     @staticmethod
@@ -84,11 +101,11 @@ class ExcelService:
         raw_sheets = pd.read_excel(buffer, sheet_name=None)
         cleaned: dict[str, pd.DataFrame] = {}
         for name, df in raw_sheets.items():
-            try:
-                cleaned_df = ExcelService.clean_dataframe(df)
-                cleaned[name] = cleaned_df
-            except (ValueError, Exception) as e:
-                print(f"⚠️ Skipping sheet '{name}': {e}")
+            result = ExcelService._try_clean(df, name)
+            if result is not None:
+                cleaned[name] = result
+            else:
+                print(f"⚠️ Skipping sheet '{name}': No year row found and not pre-cleaned")
         return cleaned
 
     @staticmethod

@@ -295,7 +295,7 @@ async def confirm_upload(
     sanitized_path = os.path.join(UPLOAD_FOLDER, filename)
     with pd.ExcelWriter(sanitized_path, engine="openpyxl") as writer:
         for sheet_name, df in sanitized_sheets.items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            df.to_excel(writer, sheet_name=sheet_name, index=True)
 
     # Clean up pending file
     os.remove(pending_path)

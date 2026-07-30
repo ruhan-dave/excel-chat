@@ -215,10 +215,18 @@ class FriendlyResponse(BaseModel):
 # Model Factory
 # ============================================================================
 
-def build_openrouter_model() -> OpenAIModel:
-    """Create an OpenAIModel configured for OpenRouter."""
+PRIMARY_MODEL = os.environ.get("MODEL_ID", "openai/gpt-oss-120b:nitro")
+FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL_ID", "deepseek/deepseek-v4-pro")
+
+
+def build_openrouter_model(model_name: str | None = None) -> OpenAIModel:
+    """Create an OpenAIModel configured for OpenRouter.
+
+    If *model_name* is provided, use it; otherwise fall back to the primary
+    model from the ``MODEL_ID`` env var.
+    """
     return OpenAIModel(
-        model_name=os.environ.get("MODEL_ID", "openai/gpt-oss-120b:nitro"),
+        model_name=model_name or PRIMARY_MODEL,
         base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         api_key=os.environ.get("OPENROUTER_API_KEY"),
     )
@@ -228,9 +236,9 @@ def build_openrouter_model() -> OpenAIModel:
 # Agent Builders
 # ============================================================================
 
-def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[SheetMeta]) -> Agent[None, QueryPlan]:
+def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[SheetMeta], model_name: str | None = None) -> Agent[None, QueryPlan]:
     """Agent that generates a structured QueryPlan from a user question."""
-    model = build_openrouter_model()
+    model = build_openrouter_model(model_name)
 
     # Build multi-sheet context
     sheet_context_parts = []
@@ -349,9 +357,9 @@ def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Sheet
     )
 
 
-def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[SheetMeta]) -> Agent[PipelineDeps, ExecutionResult]:
+def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[SheetMeta], model_name: str | None = None) -> Agent[PipelineDeps, ExecutionResult]:
     """Agent that executes a plan using tools, with structured output."""
-    model = build_openrouter_model()
+    model = build_openrouter_model(model_name)
 
     retrieve_t = Tool(retrieve, prepare=_prepare_retrieve_tool)
     extract_t = Tool(extract_val, prepare=_prepare_extract_val_tool)
@@ -486,9 +494,9 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
     )
 
 
-def build_responder_agent() -> Agent[None, str]:
+def build_responder_agent(model_name: str | None = None) -> Agent[None, str]:
     """Agent that generates a friendly natural language response."""
-    model = build_openrouter_model()
+    model = build_openrouter_model(model_name)
 
     return Agent(
         model,
@@ -503,6 +511,40 @@ def build_responder_agent() -> Agent[None, str]:
         """,
         model_settings={"temperature": 0.3},
     )
+
+
+def _is_empty_response_error(exc: Exception) -> bool:
+    """Check whether *exc* is an empty-model-response error from pydantic-ai."""
+    msg = str(exc).lower()
+    return "empty model response" in msg or "received empty" in msg
+
+
+async def _run_with_fallback(
+    build_agent: Callable[..., Agent],
+    prompt: str,
+    *args,
+    deps: Any = None,
+    **kwargs,
+) -> Any:
+    """Run an agent, retrying with the fallback model on empty-response errors.
+
+    *build_agent* is called with *args* and **kwargs to create the primary
+    agent. If the primary agent's ``run`` raises an empty-response error, the
+    same builder is called with ``model_name=FALLBACK_MODEL`` and retried.
+    """
+    agent = build_agent(*args, **kwargs)
+    try:
+        if deps is not None:
+            return await agent.run(prompt, deps=deps)
+        return await agent.run(prompt)
+    except Exception as exc:
+        if not _is_empty_response_error(exc):
+            raise
+        print(f"⚠️ Primary model returned empty response, retrying with {FALLBACK_MODEL}…")
+        fallback_agent = build_agent(*args, **kwargs, model_name=FALLBACK_MODEL)
+        if deps is not None:
+            return await fallback_agent.run(prompt, deps=deps)
+        return await fallback_agent.run(prompt)
 
 
 def _format_simple_response(query: str, plan: QueryPlan, execution: ExecutionResult) -> str | None:
@@ -691,9 +733,10 @@ def build_query_pipeline(
 
         # Step 1: Plan
         _emit("status", {"message": "Analyzing your question…"})
-        planner = build_planner_agent(sheets, sheet_metas)
         with timed("planner", timings):
-            plan_result = await planner.run(query)
+            plan_result = await _run_with_fallback(
+                build_planner_agent, query, sheets, sheet_metas
+            )
         plan: QueryPlan = plan_result.data
         print("Plan:", json.dumps(plan.model_dump(), indent=2))
 
@@ -775,7 +818,6 @@ def build_query_pipeline(
             }
 
         _emit("status", {"message": "Running calculations…"})
-        executor = build_executor_agent(sheets, sheet_metas)
 
         # Build execution prompt from the plan
         if plan.task_type == "retrieve_numbers" and plan.items:
@@ -837,7 +879,9 @@ def build_query_pipeline(
             exec_prompt = query
 
         with timed("executor", timings):
-            exec_result = await executor.run(exec_prompt, deps=deps)
+            exec_result = await _run_with_fallback(
+                build_executor_agent, exec_prompt, sheets, sheet_metas, deps=deps
+            )
         execution: ExecutionResult = exec_result.data
         print("✅ Execution:", json.dumps(execution.model_dump(), indent=2))
         _emit("execution", {"step_results": execution.step_results, "final_answer": execution.final_answer, "explanation": execution.explanation})
@@ -885,7 +929,7 @@ async def generate_user_friendly_response(
     {json.dumps(json_result, indent=2)}
 
     Provide a clear, natural language response."""
-    result = await responder.run(prompt)
+    result = await _run_with_fallback(build_responder_agent, prompt)
     return inject_disclaimer(result.data)
 
 

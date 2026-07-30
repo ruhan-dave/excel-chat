@@ -34,7 +34,7 @@ EXCEL_FILE = Path(__file__).parent.parent / "example_sheets" / "Detailed_Expense
 
 def _build_pipeline():
     """Build a query pipeline from the example Excel file."""
-    df = pd.read_excel(EXCEL_FILE, index_col=0)
+    df = pd.read_excel(EXCEL_FILE)
     cleaned = ExcelService.clean_dataframe(df)
     sheets = {"Sheet1": cleaned}
 

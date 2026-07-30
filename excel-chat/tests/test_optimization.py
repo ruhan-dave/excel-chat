@@ -376,9 +376,7 @@ def test_format_pre_populated_block_empty_returns_empty_string():
 def test_default_model_is_gpt_oss_120b_nitro():
     """build_openrouter_model must default to the :nitro tier."""
     import pipeline
-    src = inspect.getsource(pipeline.build_openrouter_model)
-    assert "openai/gpt-oss-120b:nitro" in src
-    assert "deepseek/deepseek-v4-flash" not in src
+    assert pipeline.PRIMARY_MODEL == "openai/gpt-oss-120b:nitro"
 
 
 # ---------------------------------------------------------------------------

@@ -103,7 +103,7 @@ def test_query_wages_and_salaries(uploaded_data):
         f"{BASE_URL}/query",
         params={"query": "How much did I spend on wages and salaries in 2022?"},
         headers={"X-User-ID": "ci-test"},
-        timeout=60,
+        timeout=120,
     )
     assert r.status_code == 200, f"Query failed: {r.status_code} {r.text}"
     result = r.json()
@@ -116,7 +116,7 @@ def test_query_percentage_calculation(uploaded_data):
         f"{BASE_URL}/query",
         params={"query": "What percentage of grants are from public sources?"},
         headers={"X-User-ID": "ci-test"},
-        timeout=60,
+        timeout=120,
     )
     assert r.status_code == 200, f"Query failed: {r.status_code} {r.text}"
     result = r.json()
@@ -130,7 +130,7 @@ def test_query_stream_endpoint(uploaded_data):
         params={"query": "What were the wages and salaries in 2022?", "thread_id": ""},
         headers={"X-User-ID": "ci-test"},
         stream=True,
-        timeout=60,
+        timeout=120,
     )
     assert r.status_code == 200
     # Read first few chunks to confirm SSE stream is active

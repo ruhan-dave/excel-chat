@@ -168,13 +168,23 @@ def _is_valid_value(val: Any) -> bool:
         return False
 
 
-def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
-    """Retrieve a numeric value from the financial DataFrame(s).
+def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str = "", sheet: str = "", years: list[str] | None = None) -> str:
+    """Retrieve a SINGLE numeric value for one (field, year) pair.
 
-    If a sheet name is provided, search only that sheet.
-    If no sheet name is provided, search across all sheets and return
+    Args:
+        field: The financial field to look up (e.g. "Revenue").
+        year: A single year string (e.g. "2023"). Use THIS for one value.
+        sheet: Optional sheet name to restrict search.
+        years: Do NOT use this parameter — use retrieve_batch instead.
+
+    If a sheet name is provided, searches only that sheet.
+    If no sheet name is provided, searches across all sheets and returns
     all matching values (useful for cross-sheet comparisons in consistent-schema groups).
     """
+    if not year and years:
+        year = years[0] if len(years) == 1 else ", ".join(years)
+    if not year:
+        return "ERROR: 'year' parameter is required. Pass a single year string like '2023'."
     # Layer 1: Check result cache before scanning DataFrame
     try:
         from result_cache import build_retrieve_key, result_cache_get, result_cache_set
@@ -225,9 +235,9 @@ def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = 
     return result
 
 
-def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
+def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str = "", sheet: str = "", years: list[str] | None = None) -> str:
     """Extract a single value from the DataFrame by field and year (optionally from a specific sheet)."""
-    return retrieve(ctx, field, year, sheet)
+    return retrieve(ctx, field, year, sheet, years)
 
 
 def retrieve_batch(
@@ -1007,17 +1017,28 @@ async def _prepare_retrieve_tool(
     fields = ctx.deps.available_fields
     years = ctx.deps.available_years
     sheet_names = list(ctx.deps.sheets.keys())
-    tool_def.parameters_json_schema["properties"]["field"]["description"] = (
-        f"Field name from available fields: {', '.join(fields)}"
-    )
-    tool_def.parameters_json_schema["properties"]["year"]["description"] = (
-        f"Year from available years: {', '.join(years)}"
-    )
-    if "sheet" in tool_def.parameters_json_schema.get("properties", {}):
-        tool_def.parameters_json_schema["properties"]["sheet"]["description"] = (
+    props = tool_def.parameters_json_schema.get("properties", {})
+    if "field" in props:
+        props["field"]["description"] = (
+            f"Field name from available fields: {', '.join(fields)}"
+        )
+    if "year" in props:
+        props["year"]["description"] = (
+            f"Single year from available years: {', '.join(years)}"
+        )
+    if "years" in props:
+        props["years"]["description"] = (
+            "Do NOT use this parameter. Use retrieve_batch instead. "
+            "Only accepted for backwards compatibility."
+        )
+    if "sheet" in props:
+        props["sheet"]["description"] = (
             f"Sheet name (optional). Available sheets: {', '.join(sheet_names)}. "
             f"If omitted, searches all sheets."
         )
+    # 'year' is now optional in the function signature; update required list
+    req = tool_def.parameters_json_schema.get("required", [])
+    tool_def.parameters_json_schema["required"] = [r for r in req if r != "year"]
     return tool_def
 
 

@@ -168,23 +168,24 @@ def _is_valid_value(val: Any) -> bool:
         return False
 
 
-def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str = "", sheet: str = "", years: list[str] | None = None) -> str:
+def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str | list[str], sheet: str = "") -> str:
     """Retrieve a SINGLE numeric value for one (field, year) pair.
 
     Args:
         field: The financial field to look up (e.g. "Revenue").
-        year: A single year string (e.g. "2023"). Use THIS for one value.
+        year: A single year string (e.g. "2023"). If a list of years is
+              provided, only the first year is used — use retrieve_batch
+              for multi-year lookups.
         sheet: Optional sheet name to restrict search.
-        years: Do NOT use this parameter — use retrieve_batch instead.
 
     If a sheet name is provided, searches only that sheet.
     If no sheet name is provided, searches across all sheets and returns
     all matching values (useful for cross-sheet comparisons in consistent-schema groups).
     """
-    if not year and years:
-        year = years[0] if len(years) == 1 else ", ".join(years)
-    if not year:
-        return "ERROR: 'year' parameter is required. Pass a single year string like '2023'."
+    if isinstance(year, list):
+        if not year:
+            return "ERROR: 'year' parameter is empty."
+        year = year[0] if len(year) == 1 else ", ".join(str(y) for y in year)
     # Layer 1: Check result cache before scanning DataFrame
     try:
         from result_cache import build_retrieve_key, result_cache_get, result_cache_set
@@ -235,9 +236,9 @@ def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str = "", sheet: s
     return result
 
 
-def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str = "", sheet: str = "", years: list[str] | None = None) -> str:
+def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str | list[str], sheet: str = "") -> str:
     """Extract a single value from the DataFrame by field and year (optionally from a specific sheet)."""
-    return retrieve(ctx, field, year, sheet, years)
+    return retrieve(ctx, field, year, sheet)
 
 
 def retrieve_batch(
@@ -1024,21 +1025,14 @@ async def _prepare_retrieve_tool(
         )
     if "year" in props:
         props["year"]["description"] = (
-            f"Single year from available years: {', '.join(years)}"
-        )
-    if "years" in props:
-        props["years"]["description"] = (
-            "Do NOT use this parameter. Use retrieve_batch instead. "
-            "Only accepted for backwards compatibility."
+            f"Single year from available years: {', '.join(years)}. "
+            f"Pass a single year string like '2023'."
         )
     if "sheet" in props:
         props["sheet"]["description"] = (
             f"Sheet name (optional). Available sheets: {', '.join(sheet_names)}. "
             f"If omitted, searches all sheets."
         )
-    # 'year' is now optional in the function signature; update required list
-    req = tool_def.parameters_json_schema.get("required", [])
-    tool_def.parameters_json_schema["required"] = [r for r in req if r != "year"]
     return tool_def
 
 

@@ -168,24 +168,41 @@ def _is_valid_value(val: Any) -> bool:
         return False
 
 
-def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str | list[str], sheet: str = "") -> str:
-    """Retrieve a SINGLE numeric value for one (field, year) pair.
+def retrieve_values(
+    ctx: RunContext[PipelineDeps],
+    field: str,
+    years: list[str],
+    sheet: str = "",
+) -> str:
+    """Retrieve numeric value(s) for a field across one or more years.
 
     Args:
         field: The financial field to look up (e.g. "Revenue").
-        year: A single year string (e.g. "2023"). If a list of years is
-              provided, only the first year is used — use retrieve_batch
-              for multi-year lookups.
-        sheet: Optional sheet name to restrict search.
+        years: List of year strings to retrieve (e.g. ["2023"] for a single
+               year, or ["2020", "2021", "2022"] for multiple years).
+        sheet: Optional sheet name to restrict search. If omitted, searches
+               all sheets and returns values from every matching sheet.
 
-    If a sheet name is provided, searches only that sheet.
-    If no sheet name is provided, searches across all sheets and returns
-    all matching values (useful for cross-sheet comparisons in consistent-schema groups).
+    Returns:
+        For a single year: a string like "1500.0" (single sheet) or
+        "Sheet1: 1500.0; Sheet2: 1300.0" (cross-sheet).
+        For multiple years: a JSON string like {"2020": 1500.0, "2021": 1200.0}
+        (single-sheet) or {"2020": {"Sheet1": 1500.0, "Sheet2": 1300.0}, ...}
+        (cross-sheet).
     """
-    if isinstance(year, list):
-        if not year:
-            return "ERROR: 'year' parameter is empty."
-        year = year[0] if len(year) == 1 else ", ".join(str(y) for y in year)
+    if not years:
+        return "ERROR: 'years' parameter is required. Pass a list like ['2023'] or ['2020', '2021', '2022']."
+
+    # Single year — delegate to the single-value logic for a clean string return
+    if len(years) == 1:
+        return _retrieve_single(ctx, field, years[0], sheet)
+
+    # Multiple years — batch retrieval with JSON output
+    return _retrieve_multi(ctx, field, years, sheet)
+
+
+def _retrieve_single(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
+    """Retrieve a single (field, year) value — returns a plain string."""
     # Layer 1: Check result cache before scanning DataFrame
     try:
         from result_cache import build_retrieve_key, result_cache_get, result_cache_set
@@ -236,39 +253,8 @@ def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str | list[str], s
     return result
 
 
-def extract_val(ctx: RunContext[PipelineDeps], field: str, year: str | list[str], sheet: str = "") -> str:
-    """Extract a single value from the DataFrame by field and year (optionally from a specific sheet)."""
-    return retrieve(ctx, field, year, sheet)
-
-
-def retrieve_batch(
-    ctx: RunContext[PipelineDeps],
-    field: str,
-    years: list[str],
-    sheet: str = "",
-) -> str:
-    """Retrieve multiple year values for a single field in ONE tool call.
-
-    Optimization 1: collapses N sequential ``retrieve(field, year)`` calls
-    (each a separate LLM round-trip) into a single round-trip. For a query
-    like "lowest capital expenditure 2018-2022", this saves ~10-32s vs the
-    single-value tool.
-
-    Args:
-        field: The financial field to look up (e.g. "Capital expenditure").
-        years: List of years to retrieve (e.g. ["2018", "2019", "2020"]).
-        sheet: Optional sheet name to restrict search.
-
-    Returns a JSON string like ``{"2018": 1500.0, "2019": 1200.0}`` (single-
-    sheet mode) or ``{"2018": {"Sheet1": 1500.0, "Sheet2": 1300.0}, ...}``
-    (cross-sheet mode). Per-year errors are returned as ``null`` for that key
-    so a partial result is still useful.
-    """
-    if not years:
-        return json.dumps({})
-
-    # Per-call cache so repeated batches hit the Layer-1 retrieve cache
-    # without re-scanning DataFrames.
+def _retrieve_multi(ctx: RunContext[PipelineDeps], field: str, years: list[str], sheet: str = "") -> str:
+    """Retrieve multiple year values — returns a JSON string."""
     try:
         from result_cache import build_retrieve_key, result_cache_get, result_cache_set
         use_cache = True
@@ -307,11 +293,6 @@ def retrieve_batch(
                 pass  # skip missing years entirely
     else:
         # Cross-sheet mode: group values by year → {sheet: value}.
-        # NOTE: deliberately skip the cache read here. The retrieve cache key
-        # ``field_year`` (no sheet) is shared with single-sheet retrievals, so
-        # reading from it could return a stale value from a different user's
-        # sheet set. Writes are similarly skipped — callers can use
-        # sheet-scoped retrievals for cacheable values.
         for year in years:
             matches: dict[str, float] = {}
             for sheet_name, df in sheets.items():
@@ -1011,42 +992,10 @@ def get_sheet_dtypes(ctx: RunContext[PipelineDeps], sheet_name: str) -> str:
 # Tool Prepare Functions (dynamic schema customization)
 # ============================================================================
 
-async def _prepare_retrieve_tool(
+async def _prepare_retrieve_values_tool(
     ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
-    """Inject available fields/years/sheets into the retrieve tool schema."""
-    fields = ctx.deps.available_fields
-    years = ctx.deps.available_years
-    sheet_names = list(ctx.deps.sheets.keys())
-    props = tool_def.parameters_json_schema.get("properties", {})
-    if "field" in props:
-        props["field"]["description"] = (
-            f"Field name from available fields: {', '.join(fields)}"
-        )
-    if "year" in props:
-        props["year"]["description"] = (
-            f"Single year from available years: {', '.join(years)}. "
-            f"Pass a single year string like '2023'."
-        )
-    if "sheet" in props:
-        props["sheet"]["description"] = (
-            f"Sheet name (optional). Available sheets: {', '.join(sheet_names)}. "
-            f"If omitted, searches all sheets."
-        )
-    return tool_def
-
-
-async def _prepare_extract_val_tool(
-    ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
-) -> ToolDefinition | None:
-    """Inject available fields/years/sheets into the extract_val tool schema."""
-    return await _prepare_retrieve_tool(ctx, tool_def)
-
-
-async def _prepare_retrieve_batch_tool(
-    ctx: RunContext[PipelineDeps], tool_def: ToolDefinition
-) -> ToolDefinition | None:
-    """Inject available fields/years/sheets into the retrieve_batch tool schema."""
+    """Inject available fields/years/sheets into the retrieve_values tool schema."""
     fields = ctx.deps.available_fields
     years = ctx.deps.available_years
     sheet_names = list(ctx.deps.sheets.keys())
@@ -1058,9 +1007,8 @@ async def _prepare_retrieve_batch_tool(
     if "years" in props:
         props["years"]["description"] = (
             f"List of years from available years: {', '.join(years)}. "
-            f"Pass multiple years to fetch them in a single tool call."
+            f"Pass a single year like ['2023'] or multiple like ['2020', '2021', '2022']."
         )
-        # Allow a small array (most queries want 2-10 years).
         props["years"].setdefault("minItems", 1)
     if "sheet" in props:
         props["sheet"]["description"] = (

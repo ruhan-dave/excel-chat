@@ -18,9 +18,7 @@ from guardrails import GUARDRAIL_SYSTEM_PROMPT, inject_disclaimer
 from tools import (
     PipelineDeps,
     NAMED_OPERATIONS,
-    retrieve,
-    extract_val,
-    retrieve_batch,
+    retrieve_values,
     execute_python_code,
     analyze_sheet,
     find_missing_data,
@@ -37,9 +35,7 @@ from tools import (
     value_counts_analysis,
     deduplicate_rows,
     get_sheet_dtypes,
-    _prepare_retrieve_tool,
-    _prepare_extract_val_tool,
-    _prepare_retrieve_batch_tool,
+    _prepare_retrieve_values_tool,
 )
 
 
@@ -76,7 +72,7 @@ def timed(stage: str, timings: dict[str, float]):
 class PlanStep(BaseModel):
     """A single step in the execution plan."""
     action: Literal[
-        "retrieve", "retrieve_batch", "compute",
+        "retrieve", "compute",
         "add", "subtract", "multiply", "divide", "return_percentage",
         "sqrt", "power", "log", "exp", "abs", "negate",
         "max", "min", "average", "median", "stdev",
@@ -84,9 +80,7 @@ class PlanStep(BaseModel):
     ] = Field(
         description=(
             "The action to perform. "
-            "'retrieve' fetches a single value from the DataFrame. "
-            "'retrieve_batch' fetches multiple year values for one field in ONE call "
-            "(preferred when you need 2+ years for the same field — saves LLM round-trips). "
+            "'retrieve' fetches value(s) from the DataFrame — pass one or more years. "
             "'compute' runs arbitrary Python code in a secure sandbox for complex calculations. "
             "Named operations (add, subtract, multiply, divide, return_percentage, sqrt, power, "
             "log, exp, abs, negate, max, min, average, median, stdev, yoy_growth, cagr, ratio, "
@@ -95,10 +89,9 @@ class PlanStep(BaseModel):
     )
     args: list[str] = Field(
         description=(
-            "For 'retrieve': ['FieldName', 'Year'] to search all sheets, "
-            "or ['SheetName', 'FieldName', 'Year'] to search a specific sheet. "
-            "For 'retrieve_batch': ['FieldName', 'Year1', 'Year2', ...] for cross-sheet, "
-            "or ['SheetName', 'FieldName', 'Year1', 'Year2', ...] for a specific sheet. "
+            "For 'retrieve': ['FieldName', 'Year1', 'Year2', ...] to search all sheets, "
+            "or ['SheetName', 'FieldName', 'Year1', 'Year2', ...] to search a specific sheet. "
+            "Pass one year for a single value or multiple years for a batch. "
             "For 'compute': a natural-language description of the calculation. "
             "For named operations: references to prior steps (e.g. ['step1', 'step2']) "
             "or literal numbers (e.g. ['step1', '100']). "
@@ -286,12 +279,11 @@ def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Sheet
     For retrieve_numbers: return items like ["Revenue, 2022"] or ["SheetName, Revenue, 2022"] for sheet-specific retrieval.
     For perform_calculations: return a plan using these step types:
 
-    1. retrieve — fetch a single value: args = ["FieldName", "Year"] (searches all sheets) or ["SheetName", "FieldName", "Year"] (specific sheet)
-    2. retrieve_batch — fetch multiple year values for ONE field in a single step (PREFERRED when 2+ years needed for the same field — saves executor LLM round-trips):
-       args = ["FieldName", "Year1", "Year2", ...] for cross-sheet, or
-              ["SheetName", "FieldName", "Year1", "Year2", ...] for a specific sheet
-       Example: step1: retrieve_batch ["Capital expenditure", "2018", "2019", "2020", "2021", "2022"]
-    3. Named math operations — apply to prior step results or literal numbers:
+    1. retrieve — fetch value(s) from the DataFrame. Pass one or more years.
+       For a single year: args = ["FieldName", "Year"] (searches all sheets) or ["SheetName", "FieldName", "Year"] (specific sheet)
+       For multiple years: args = ["FieldName", "Year1", "Year2", ...] (searches all sheets) or ["SheetName", "FieldName", "Year1", "Year2", ...] (specific sheet)
+       Example: step1: retrieve ["Capital expenditure", "2018", "2019", "2020", "2021", "2022"]
+    2. Named math operations — apply to prior step results or literal numbers:
        - Unary (1 arg): sqrt, abs, negate, exp
        - Binary (2 args): subtract, divide, return_percentage, power, log, yoy_growth, ratio, percentage_change, difference
        - Ternary (3 args): cagr [end_value, start_value, num_years]
@@ -334,8 +326,8 @@ def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Sheet
     step2: retrieve ["Revenue", "2018"]
     step3: cagr ["step1", "step2", "5"]
 
-    [Multi-year batch (preferred over N retrievals)]
-    step1: retrieve_batch ["Capital expenditure", "2018", "2019", "2020", "2021", "2022"]
+    [Multi-year batch]
+    step1: retrieve ["Capital expenditure", "2018", "2019", "2020", "2021", "2022"]
     step2: compute ["Find the year with the lowest capital expenditure among step1"]
 
     [Complex calculation via compute]
@@ -361,50 +353,43 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
     """Agent that executes a plan using tools, with structured output."""
     model = build_openrouter_model(model_name)
 
-    retrieve_t = Tool(retrieve, prepare=_prepare_retrieve_tool)
-    extract_t = Tool(extract_val, prepare=_prepare_extract_val_tool)
-    retrieve_batch_t = Tool(retrieve_batch, prepare=_prepare_retrieve_batch_tool)
+    retrieve_t = Tool(retrieve_values, prepare=_prepare_retrieve_values_tool)
 
     sheet_names = list(sheets.keys())
     system_prompt = f"""You are a financial data execution engine.
 
     You have access to {len(sheets)} sheet(s): {', '.join(sheet_names)}
 
-    You have three tools:
-    1. retrieve / extract_val — fetch a SINGLE value for a (field, year) pair
-       - If a sheet name is provided, searches only that sheet.
-       - If no sheet name is provided, searches all sheets and returns all matching values.
-    2. retrieve_batch — fetch MULTIPLE year values for ONE field in a single tool call.
-       PREFER THIS TOOL when you need 2+ years for the same field — each call to
-       retrieve is a separate LLM round-trip, but retrieve_batch collapses them
-       into one. For example, instead of:
-           retrieve("Capital", "2018"); retrieve("Capital", "2019"); retrieve("Capital", "2020");
-       do:
-           retrieve_batch("Capital", ["2018", "2019", "2020"])
-       Returns a JSON object like {{"2018": 1500.0, "2019": 1200.0}} for single-sheet
+    You have two main tools:
+    1. retrieve_values — fetch value(s) for a field across one or more years.
+       Pass a list of years: ["2023"] for a single year, or ["2020", "2021", "2022"] for multiple.
+       If a sheet name is provided, searches only that sheet.
+       If no sheet name is provided, searches all sheets and returns all matching values.
+       For a single year, returns a string like "1500.0" or "Sheet1: 1500.0; Sheet2: 1300.0".
+       For multiple years, returns a JSON object like {{"2018": 1500.0, "2019": 1200.0}} for single-sheet
        mode, or {{"2018": {{"Sheet1": 1500.0, "Sheet2": 1300.0}}}} for cross-sheet mode.
-    3. execute_python_code — run Python code in a secure sandbox to perform ANY calculation
+    2. execute_python_code — run Python code in a secure sandbox to perform ANY calculation
 
     You also have EDA (exploratory data analysis) tools for DataFrame-level inspection:
-    4. analyze_sheet(sheet_name) — comprehensive EDA: dimensions, describe(), duplicates, per-column stats
-    5. find_missing_data(sheet_name) — missing data report (counts and percentages per column)
-    6. discover_column_types(sheet_name) — classify columns as categorical/discrete/continuous
-    7. get_sheet_shape(sheet_name) — return row x column dimensions
-    8. group_summary_stats(sheet_name, group_col, value_col) — groupby with count/sum/mean/median/std/min/max
-    9. create_pivot_table(sheet_name, index, columns, values) — pivot table with mean aggregation
-    10. crosstab_analysis(sheet_name, col1, col2, aggfunc) — cross-tabulation (aggfunc: mean/median/count/std)
-    11. drop_missing_columns(sheet_name, threshold) — drop columns with missing data above threshold fraction
-    12. convert_to_numerical(sheet_name, columns) — convert categorical columns to numerical, fill NaN with mean
-    13. correlation_analysis(sheet_name, columns) — full correlation matrix for numerical columns
-    14. get_sheet_head(sheet_name, n) — first N rows (like df.head(n))
-    15. get_sheet_info(sheet_name) — dtypes, non-null counts, memory usage (like df.info())
-    16. value_counts_analysis(sheet_name, column, normalize) — value counts for a column
-    17. deduplicate_rows(sheet_name, subset) — find and report duplicate rows
-    18. get_sheet_dtypes(sheet_name) — dtype of each column
+    3. analyze_sheet(sheet_name) — comprehensive EDA: dimensions, describe(), duplicates, per-column stats
+    4. find_missing_data(sheet_name) — missing data report (counts and percentages per column)
+    5. discover_column_types(sheet_name) — classify columns as categorical/discrete/continuous
+    6. get_sheet_shape(sheet_name) — return row x column dimensions
+    7. group_summary_stats(sheet_name, group_col, value_col) — groupby with count/sum/mean/median/std/min/max
+    8. create_pivot_table(sheet_name, index, columns, values) — pivot table with mean aggregation
+    9. crosstab_analysis(sheet_name, col1, col2, aggfunc) — cross-tabulation (aggfunc: mean/median/count/std)
+    10. drop_missing_columns(sheet_name, threshold) — drop columns with missing data above threshold fraction
+    11. convert_to_numerical(sheet_name, columns) — convert categorical columns to numerical, fill NaN with mean
+    12. correlation_analysis(sheet_name, columns) — full correlation matrix for numerical columns
+    13. get_sheet_head(sheet_name, n) — first N rows (like df.head(n))
+    14. get_sheet_info(sheet_name) — dtypes, non-null counts, memory usage (like df.info())
+    15. value_counts_analysis(sheet_name, column, normalize) — value counts for a column
+    16. deduplicate_rows(sheet_name, subset) — find and report duplicate rows
+    17. get_sheet_dtypes(sheet_name) — dtype of each column
 
     Use EDA tools when the user asks about data quality, distributions, correlations,
     missing values, column types, or wants a summary/overview of the data.
-    Use retrieve/retrieve_batch + execute_python_code for specific value lookups and calculations.
+    Use retrieve_values + execute_python_code for specific value lookups and calculations.
 
     The sandbox supports:
     - Basic Python syntax and operators (+, -, *, /, **, //, %)
@@ -422,8 +407,8 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
       (all accept Python lists and return JSON-serializable types)
 
     Execution flow:
-    1. Call retrieve_batch (preferred when you need multiple years for one field)
-       or retrieve (for single values) to get all needed values from the plan
+    1. Call retrieve_values to get all needed values from the plan.
+       Pass multiple years in one call when you need several years for the same field.
     2. For named operations (add, subtract, multiply, divide, return_percentage, sqrt, power,
        log, exp, abs, negate, max, min, average, median, stdev, yoy_growth, cagr, ratio,
        percentage_change, difference): either compute directly in Python or use execute_python_code
@@ -438,9 +423,9 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
     ### CRITICAL — step_results MUST be populated:
     The `step_results` field in your output MUST contain an entry for EVERY step in the plan,
     including pre-populated steps. For each step key (e.g. "step1", "step2"), set its value
-    to the result of that step. For retrieve/retrieve_batch steps, use the retrieved value(s).
+    to the result of that step. For retrieve steps, use the retrieved value(s).
     For named operations and compute steps, use the computed result.
-    Example: if the plan has step1 (retrieve_batch), step2 (retrieve_batch), step3 (compute),
+    Example: if the plan has step1 (retrieve), step2 (retrieve), step3 (compute),
     then step_results should be: {{"step1": {{...}}, "step2": {{...}}, "step3": <computed_value>}}.
     Do NOT leave step_results as an empty dict {{}}.
 
@@ -470,8 +455,6 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
         system_prompt=system_prompt,
         tools=[
             retrieve_t,
-            extract_t,
-            retrieve_batch_t,
             execute_python_code,
             analyze_sheet,
             find_missing_data,
@@ -606,14 +589,14 @@ def _looks_like_year(s: str) -> bool:
 
 
 def _prepopulate_retrievals(plan: QueryPlan, deps: PipelineDeps) -> dict[str, Any]:
-    """Execute every retrieve / retrieve_batch step in pure Python (no LLM).
+    """Execute every retrieve step in pure Python (no LLM).
 
     Optimization 2: collapses N sequential LLM round-trips into a single
     Python pass before the executor runs. The executor then only handles
     computation + friendly-response generation.
 
-    The returned dict maps step name → retrieved value (a scalar string from
-    ``retrieve`` or a parsed dict from ``retrieve_batch``). Per-step failures
+    The returned dict maps step name → retrieved value (a scalar string for
+    single-year retrievals or a parsed dict for multi-year). Per-step failures
     are captured as ``"ERROR: ..."`` strings so downstream code can decide.
     """
     from types import SimpleNamespace
@@ -622,7 +605,7 @@ def _prepopulate_retrievals(plan: QueryPlan, deps: PipelineDeps) -> dict[str, An
     if not plan.plan:
         return pre_populated
 
-    # ``retrieve`` and ``retrieve_batch`` only touch ``ctx.deps`` — a
+    # ``retrieve_values`` only touches ``ctx.deps`` — a
     # SimpleNamespace is sufficient.
     ctx = SimpleNamespace(deps=deps)
 
@@ -630,32 +613,27 @@ def _prepopulate_retrievals(plan: QueryPlan, deps: PipelineDeps) -> dict[str, An
         args = step.args or []
         try:
             if step.action == "retrieve":
-                if len(args) == 2:
-                    field, year = args
-                    pre_populated[name] = retrieve(ctx, field, year)
-                elif len(args) == 3:
-                    sheet, field, year = args
-                    pre_populated[name] = retrieve(ctx, field, year, sheet)
-                else:
-                    pre_populated[name] = f"ERROR: retrieve expects 2 or 3 args, got {len(args)}"
-            elif step.action == "retrieve_batch":
                 # Cross-sheet: ["Field", "Year1", "Year2", ...] → args[1] is a year
                 # Specific sheet: ["Sheet", "Field", "Year1", ...] → args[1] is the field
                 if len(args) < 2:
-                    pre_populated[name] = "ERROR: retrieve_batch needs at least 2 args"
+                    pre_populated[name] = "ERROR: retrieve needs at least 2 args"
                     continue
                 if _looks_like_year(args[1]):
                     field = args[0]
                     years = args[1:]
-                    raw = retrieve_batch(ctx, field, years, sheet="")
+                    raw = retrieve_values(ctx, field, years, sheet="")
                 else:
                     sheet = args[0]
                     field = args[1]
                     years = args[2:]
-                    raw = retrieve_batch(ctx, field, years, sheet=sheet)
-                try:
-                    pre_populated[name] = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
+                    raw = retrieve_values(ctx, field, years, sheet=sheet)
+                # Multi-year returns JSON; single-year returns a plain string
+                if len(years) > 1:
+                    try:
+                        pre_populated[name] = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        pre_populated[name] = raw
+                else:
                     pre_populated[name] = raw
             else:
                 # Named ops / compute can't be pre-populated — leave for executor.
@@ -680,8 +658,8 @@ def _format_pre_populated_for_prompt(pre_populated: dict[str, Any]) -> str:
     if not pre_populated:
         return ""
     lines = [
-        "Pre-computed values (use these directly — do NOT call retrieve or "
-        "retrieve_batch again):"
+        "Pre-computed values (use these directly — do NOT call retrieve_values "
+        "again):"
     ]
     for name, value in pre_populated.items():
         lines.append(f"  {name}: {value}")
@@ -689,11 +667,11 @@ def _format_pre_populated_for_prompt(pre_populated: dict[str, Any]) -> str:
 
 
 def _plan_is_pure_retrieve(plan: QueryPlan) -> bool:
-    """True iff every step is a retrieve/retrieve_batch (no compute, no named ops)."""
+    """True iff every step is a retrieve (no compute, no named ops)."""
     if not plan.plan:
         return False
     return all(
-        step.action in {"retrieve", "retrieve_batch"}
+        step.action == "retrieve"
         for step in plan.plan.values()
     )
 
@@ -759,7 +737,7 @@ def build_query_pipeline(
         )
 
         # ------------------------------------------------------------------
-        # Optimization 2: pre-populate retrieve / retrieve_batch steps in pure
+        # Optimization 2: pre-populate retrieve steps in pure
         # Python. The executor then only has to handle compute / friendly
         # response, which collapses the LLM round-trip count.
         # ------------------------------------------------------------------
@@ -773,7 +751,7 @@ def build_query_pipeline(
                 _emit("pre_populated", {"values": pre_populated})
 
         # ------------------------------------------------------------------
-        # Short-circuit: if every step is a retrieve/retrieve_batch, we don't
+        # Short-circuit: if every step is a retrieve, we don't
         # need the executor at all. Build the ExecutionResult directly.
         # ------------------------------------------------------------------
         if plan.plan and _plan_is_pure_retrieve(plan):
@@ -832,15 +810,12 @@ def build_query_pipeline(
             # field each step refers to (for use in friendly_response).
             step_field_map: list[str] = []
             for name, step in plan.plan.items():
-                if step.action in {"retrieve", "retrieve_batch"}:
+                if step.action == "retrieve":
                     # Extract field name from args for context
-                    if step.action == "retrieve_batch":
-                        if _looks_like_year(step.args[1] if len(step.args) > 1 else ""):
-                            field_name = step.args[0] if step.args else ""
-                        else:
-                            field_name = step.args[1] if len(step.args) > 1 else ""
-                    else:
+                    if _looks_like_year(step.args[1] if len(step.args) > 1 else ""):
                         field_name = step.args[0] if step.args else ""
+                    else:
+                        field_name = step.args[1] if len(step.args) > 1 else ""
                     step_field_map.append(f"  {name} → field: {field_name}")
                     # If we already pre-populated this step, tell the executor
                     # to use the literal value instead of re-fetching.
@@ -849,8 +824,7 @@ def build_query_pipeline(
                             f"  {name} (field: {field_name}): ALREADY DONE — value is {pre_populated[name]}"
                         )
                     else:
-                        verb = "retrieve_batch" if step.action == "retrieve_batch" else "retrieve"
-                        retrieve_steps.append(f"  {name} (field: {field_name}): {verb}({step.args})")
+                        retrieve_steps.append(f"  {name} (field: {field_name}): retrieve({step.args})")
                 elif step.action == "compute":
                     compute_desc = step.args[0] if step.args else ""
                 elif step.action in NAMED_OPERATIONS:

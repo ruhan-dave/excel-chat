@@ -59,15 +59,15 @@ class ClassTemplates:
         - When a query references data from multiple sheets, use sheet-specific retrieval with ["SheetName", "FieldName", "Year"]
         - Sheets in the same schema group have consistent columns and can be compared directly
 
-        ### CRITICAL — retrieve_batch usage:
-        - When a calculation needs 2+ years for the SAME field, ALWAYS use retrieve_batch instead of multiple retrieve steps.
+        ### CRITICAL — multi-year retrieve usage:
+        - When a calculation needs 2+ years for the SAME field, ALWAYS pass multiple years in a single retrieve step.
           WRONG: step1: retrieve ["Revenue", "2018"], step2: retrieve ["Revenue", "2019"], step3: retrieve ["Revenue", "2020"]
-          RIGHT: step1: retrieve_batch ["Revenue", "2018", "2019", "2020"], step2: compute ["Calculate the average of the retrieved values"]
-        - For average/mean queries: use retrieve_batch to get all years in one step, then use the "average" named operation with the retrieved values.
-        - For stability/variability queries (standard deviation, coefficient of variation): use retrieve_batch for each field, then use "stdev" named operation.
-        - For trend analysis over multiple years: use retrieve_batch to get all years, then use compute for year-over-year differences.
-        - For growth rate comparisons between two fields: use retrieve_batch for each field (2 retrieve_batch calls), then compute the CAGR or growth rate.
-        - retrieve_batch returns a JSON object like {{"2018": 1500.0, "2019": 1200.0}}. When passing its result to a named operation,
+          RIGHT: step1: retrieve ["Revenue", "2018", "2019", "2020"], step2: compute ["Calculate the average of the retrieved values"]
+        - For average/mean queries: use retrieve with all years in one step, then use the "average" named operation with the retrieved values.
+        - For stability/variability queries (standard deviation, coefficient of variation): use retrieve for each field, then use "stdev" named operation.
+        - For trend analysis over multiple years: use retrieve to get all years, then use compute for year-over-year differences.
+        - For growth rate comparisons between two fields: use retrieve for each field (2 retrieve calls), then compute the CAGR or growth rate.
+        - Multi-year retrieve returns a JSON object like {{"2018": 1500.0, "2019": 1200.0}}. When passing its result to a named operation,
           use compute to extract the values: e.g. compute ["Calculate average of step1 values: sum(step1.values())/len(step1)"].
 
         ### Examples:
@@ -104,34 +104,34 @@ class ClassTemplates:
         ]
         }}
 
-        [Example 3b: Average over multiple years — MUST use perform_calculations with retrieve_batch]
+        [Example 3b: Average over multiple years — MUST use perform_calculations with retrieve]
         Query: "What's the average annual expense on grants to foreign governments between 2015-2020?"
         {{
         "task_type": "perform_calculations",
         "plan": {{
-            "step1": {{"action": "retrieve_batch", "args": ["Grants to foreign governments", "2015", "2016", "2017", "2018", "2019", "2020"]}},
+            "step1": {{"action": "retrieve", "args": ["Grants to foreign governments", "2015", "2016", "2017", "2018", "2019", "2020"]}},
             "step2": {{"action": "compute", "args": ["Calculate the average of the values in step1: sum(step1.values()) / len(step1)"]}}
         }}
         }}
 
-        [Example 3c: Stability comparison over multiple years — MUST use perform_calculations with retrieve_batch]
+        [Example 3c: Stability comparison over multiple years — MUST use perform_calculations with retrieve]
         Query: "Which showed greater stability over 2012-2021: wages and salaries or employers' social contributions?"
         {{
         "task_type": "perform_calculations",
         "plan": {{
-            "step1": {{"action": "retrieve_batch", "args": ["Wages and salaries", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021"]}},
-            "step2": {{"action": "retrieve_batch", "args": ["Employers' social contributions", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021"]}},
+            "step1": {{"action": "retrieve", "args": ["Wages and salaries", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021"]}},
+            "step2": {{"action": "retrieve", "args": ["Employers' social contributions", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021"]}},
             "step3": {{"action": "compute", "args": ["Calculate the standard deviation of step1 values and step2 values, then identify which has lower standard deviation (more stable)"]}}
         }}
         }}
 
-        [Example 3d: Growth rate comparison between two fields — MUST use retrieve_batch]
+        [Example 3d: Growth rate comparison between two fields — MUST use retrieve]
         Query: "Compare the growth rates of social security benefits versus social assistance benefits from 2017 to 2021"
         {{
         "task_type": "perform_calculations",
         "plan": {{
-            "step1": {{"action": "retrieve_batch", "args": ["Social security benefits", "2017", "2021"]}},
-            "step2": {{"action": "retrieve_batch", "args": ["Social assistance benefits", "2017", "2021"]}},
+            "step1": {{"action": "retrieve", "args": ["Social security benefits", "2017", "2021"]}},
+            "step2": {{"action": "retrieve", "args": ["Social assistance benefits", "2017", "2021"]}},
             "step3": {{"action": "compute", "args": ["Calculate CAGR for step1: (step1['2021']/step1['2017'])^(1/4)-1, and CAGR for step2: (step2['2021']/step2['2017'])^(1/4)-1, then compute the difference"]}}
         }}
         }}

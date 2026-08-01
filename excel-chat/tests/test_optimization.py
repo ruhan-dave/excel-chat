@@ -2,7 +2,7 @@
 Tests for the latency optimization features in pipeline.py:
 
 * Opt 6 — ``timed()`` context manager records elapsed seconds.
-* Opt 1 — ``retrieve_batch()`` tool and ``retrieve_batch`` PlanStep action.
+* Opt 1 — ``retrieve_values()`` unified tool (single + multi-year).
 * Opt 2 — ``_prepopulate_retrievals`` short-circuits pure-retrieve plans.
 * Opt 1/2 — ``_plan_is_pure_retrieve`` and ``_format_pre_populated_for_prompt``.
 * Opt 3 — Default model name is the new ``openai/gpt-oss-120b:nitro``.
@@ -73,12 +73,12 @@ def test_timed_propagates_return_value():
 
 
 # ---------------------------------------------------------------------------
-# Opt 1: retrieve_batch tool
+# Opt 1: retrieve_values tool (unified single + multi-year)
 # ---------------------------------------------------------------------------
 
-def test_retrieve_batch_signature():
-    from pipeline import retrieve_batch
-    sig = inspect.signature(retrieve_batch)
+def test_retrieve_values_signature():
+    from pipeline import retrieve_values
+    sig = inspect.signature(retrieve_values)
     params = list(sig.parameters.keys())
     # ctx is positional, then field, years, sheet
     assert "ctx" in params
@@ -87,9 +87,9 @@ def test_retrieve_batch_signature():
     assert "sheet" in params
 
 
-def test_retrieve_batch_single_sheet_returns_scalar_dict():
-    """With a single matching sheet, retrieve_batch returns a year → float dict."""
-    from pipeline import retrieve_batch, PipelineDeps
+def test_retrieve_values_single_sheet_multi_year_returns_scalar_dict():
+    """With a single matching sheet, multi-year retrieve_values returns a year → float dict."""
+    from pipeline import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -97,21 +97,20 @@ def test_retrieve_batch_single_sheet_returns_scalar_dict():
         {"2022": [1000.0], "2023": [1500.0]},
         index=["Revenue"],
     )
-    # Use a unique user_id per test so the SQLite result cache is empty.
     deps = PipelineDeps(
         sheets={"Sheet1": df}, sheet_metas=[], original_query="q",
         user_id=f"test_{uuid.uuid4().hex[:8]}",
     )
     ctx = SimpleNamespace(deps=deps)
 
-    result_str = retrieve_batch(ctx, "Revenue", ["2022", "2023"], sheet="Sheet1")
+    result_str = retrieve_values(ctx, "Revenue", ["2022", "2023"], sheet="Sheet1")
     result = json.loads(result_str)
     assert result == {"2022": 1000.0, "2023": 1500.0}
 
 
-def test_retrieve_batch_cross_sheet_returns_per_sheet_dict():
-    """Without a sheet name, retrieve_batch returns year → {sheet: float}."""
-    from pipeline import retrieve_batch, PipelineDeps
+def test_retrieve_values_cross_sheet_returns_per_sheet_dict():
+    """Without a sheet name, multi-year retrieve_values returns year → {sheet: float}."""
+    from pipeline import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -125,14 +124,14 @@ def test_retrieve_batch_cross_sheet_returns_per_sheet_dict():
     )
     ctx = SimpleNamespace(deps=deps)
 
-    result_str = retrieve_batch(ctx, "Revenue", ["2022"], sheet="")
+    result_str = retrieve_values(ctx, "Revenue", ["2022", "2023"], sheet="")
     result = json.loads(result_str)
     assert result["2022"] == {"Sheet1": 1000.0, "Sheet2": 1000.0}
 
 
-def test_retrieve_batch_handles_missing_field():
+def test_retrieve_values_handles_missing_field():
     """A missing field returns an error message."""
-    from pipeline import retrieve_batch, PipelineDeps
+    from pipeline import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -142,12 +141,12 @@ def test_retrieve_batch_handles_missing_field():
         user_id=f"test_{uuid.uuid4().hex[:8]}",
     )
     ctx = SimpleNamespace(deps=deps)
-    result = json.loads(retrieve_batch(ctx, "DoesNotExist", ["2022"], sheet="Sheet1"))
+    result = json.loads(retrieve_values(ctx, "DoesNotExist", ["2022", "2023"], sheet="Sheet1"))
     assert "error" in result
 
 
-def test_retrieve_batch_empty_years_returns_empty_dict():
-    from pipeline import retrieve_batch, PipelineDeps
+def test_retrieve_values_empty_years_returns_error():
+    from pipeline import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -156,33 +155,28 @@ def test_retrieve_batch_empty_years_returns_empty_dict():
         user_id=f"test_{uuid.uuid4().hex[:8]}",
     )
     ctx = SimpleNamespace(deps=deps)
-    result = json.loads(retrieve_batch(ctx, "Revenue", []))
-    assert result == {}
+    result = retrieve_values(ctx, "Revenue", [])
+    assert "ERROR" in result
 
 
-def test_planstep_action_literal_includes_retrieve_batch():
-    """The PlanStep.action Literal must allow 'retrieve_batch'."""
+def test_planstep_action_literal_includes_retrieve():
+    """The PlanStep.action Literal must allow 'retrieve' and 'compute'."""
     from pipeline import PlanStep
     from typing import get_args
 
     literal_values = get_args(PlanStep.model_fields["action"].annotation)
-    assert "retrieve_batch" in literal_values
     assert "retrieve" in literal_values
     assert "compute" in literal_values
 
 
-def test_executor_agent_registers_retrieve_batch_tool():
-    """The executor agent must expose retrieve_batch as a tool."""
+def test_executor_agent_registers_retrieve_values_tool():
+    """The executor agent must expose retrieve_values as a tool."""
     from pipeline import build_executor_agent
 
     df = pd.DataFrame({"2022": [100.0]}, index=["Revenue"])
     agent = build_executor_agent({"Sheet1": df}, [])
-    # Pydantic AI stores function tools in ``_function_tools`` (dict keyed by
-    # tool name, values are ``Tool`` objects).
     tool_names = set(agent._function_tools.keys())
-    assert "retrieve" in tool_names
-    assert "extract_val" in tool_names
-    assert "retrieve_batch" in tool_names
+    assert "retrieve_values" in tool_names
     assert "execute_python_code" in tool_names
 
 
@@ -248,7 +242,7 @@ def test_prepopulate_specific_sheet_returns_scalar():
     assert result["step1"] == "1500.0"
 
 
-def test_prepopulate_retrieve_batch_returns_parsed_dict():
+def test_prepopulate_multi_year_retrieve_returns_parsed_dict():
     from pipeline import (
         _prepopulate_retrievals, PipelineDeps, QueryPlan, PlanStep,
     )
@@ -264,14 +258,14 @@ def test_prepopulate_retrieve_batch_returns_parsed_dict():
     )
     plan = QueryPlan(
         task_type="perform_calculations",
-        plan={"b1": PlanStep(action="retrieve_batch", args=["Revenue", "2022", "2023"])},
+        plan={"b1": PlanStep(action="retrieve", args=["Revenue", "2022", "2023"])},
     )
     result = _prepopulate_retrievals(plan, deps)
     assert result["b1"] == {"2022": 100.0, "2023": 150.0}
 
 
-def test_prepopulate_specific_sheet_batch():
-    """retrieve_batch with [sheet, field, years...] is routed to that sheet."""
+def test_prepopulate_specific_sheet_multi_year():
+    """retrieve with [sheet, field, years...] is routed to that sheet."""
     from pipeline import (
         _prepopulate_retrievals, PipelineDeps, QueryPlan, PlanStep,
     )
@@ -287,7 +281,7 @@ def test_prepopulate_specific_sheet_batch():
     )
     plan = QueryPlan(
         task_type="perform_calculations",
-        plan={"b1": PlanStep(action="retrieve_batch", args=["Sheet1", "Revenue", "2022", "2023"])},
+        plan={"b1": PlanStep(action="retrieve", args=["Sheet1", "Revenue", "2022", "2023"])},
     )
     result = _prepopulate_retrievals(plan, deps)
     assert result["b1"] == {"2022": 100.0, "2023": 150.0}
@@ -333,7 +327,7 @@ def test_plan_is_pure_retrieve():
         task_type="perform_calculations",
         plan={
             "a": PlanStep(action="retrieve", args=["Revenue", "2022"]),
-            "b": PlanStep(action="retrieve_batch", args=["Revenue", "2022", "2023"]),
+            "b": PlanStep(action="retrieve", args=["Revenue", "2022", "2023"]),
         },
     )
     assert _plan_is_pure_retrieve(pure) is True

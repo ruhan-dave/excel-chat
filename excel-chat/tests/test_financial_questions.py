@@ -24,7 +24,7 @@ import pytest
 BACKEND_SRC = Path(__file__).parent.parent / "backend" / "src"
 sys.path.insert(0, str(BACKEND_SRC))
 
-from pipeline import PipelineDeps, retrieve, execute_python_code
+from pipeline import PipelineDeps, retrieve_values, execute_python_code
 from pydantic_ai import RunContext
 
 
@@ -74,8 +74,8 @@ def ctx(cleaned_sheets):
 
 def _retrieve_val(ctx, field, year, sheet=""):
     """Retrieve a value and assert it's not an error."""
-    result = retrieve(ctx, field, year, sheet)
-    assert not result.startswith("ERROR"), f"retrieve('{field}', '{year}') returned: {result}"
+    result = retrieve_values(ctx, field, [year], sheet)
+    assert not result.startswith("ERROR"), f"retrieve_values('{field}', '{year}') returned: {result}"
     return float(result.split(": ")[-1] if ": " in result else result)
 
 

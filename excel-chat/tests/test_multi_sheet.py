@@ -12,7 +12,7 @@ sys.path.insert(0, str(backend_src))
 
 from sheet_metadata import SheetMeta, init_db, get_cached_response, set_cached_response, get_cache_stats
 from excelservices import ExcelService
-from pipeline import PipelineDeps, retrieve
+from pipeline import PipelineDeps, retrieve_values
 from pydantic_ai import RunContext
 import pandas as pd
 
@@ -104,7 +104,7 @@ def test_retrieve_single_sheet():
     mock_ctx = MagicMock(spec=RunContext)
     mock_ctx.deps = deps
 
-    result = retrieve(mock_ctx, "Revenue", "2022", "Sheet1")
+    result = retrieve_values(mock_ctx, "Revenue", ["2022"], "Sheet1")
     assert result == "1000.0", f"Expected '1000.0', got '{result}'"
     print("✅ test_retrieve_single_sheet passed")
 
@@ -131,7 +131,7 @@ def test_retrieve_all_sheets():
     mock_ctx = MagicMock(spec=RunContext)
     mock_ctx.deps = deps
 
-    result = retrieve(mock_ctx, "Revenue", "2022")
+    result = retrieve_values(mock_ctx, "Revenue", ["2022"])
     assert "Sheet1: 1000.0" in result, f"Expected Sheet1 value, got '{result}'"
     assert "Sheet2: 2000.0" in result, f"Expected Sheet2 value, got '{result}'"
     print("✅ test_retrieve_all_sheets passed")

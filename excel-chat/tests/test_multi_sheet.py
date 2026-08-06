@@ -153,7 +153,7 @@ def test_retrieve_not_found():
     mock_ctx = MagicMock(spec=RunContext)
     mock_ctx.deps = deps
 
-    result = retrieve(mock_ctx, "Unknown", "2022")
+    result = retrieve_values(mock_ctx, "Unknown", ["2022"])
     assert "ERROR" in result, f"Expected ERROR, got '{result}'"
     print("✅ test_retrieve_not_found passed")
 

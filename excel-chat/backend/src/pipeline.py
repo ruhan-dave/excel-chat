@@ -734,7 +734,6 @@ def build_query_pipeline(
             _emit("friendly", {"response": friendly})
             total = sum(timings.values())
             print(f"Pipeline total: {total:.2f}s | {timings}")
-            _emit("done", {"timings": timings, "total": total})
             return {
                 "answer": execution.model_dump(),
                 "friendly_response": friendly,
@@ -797,7 +796,6 @@ def build_query_pipeline(
             _emit("friendly", {"response": friendly})
             total = sum(timings.values())
             print(f"Pipeline total: {total:.2f}s | {timings}")
-            _emit("done", {"timings": timings, "total": total})
             return {
                 "answer": execution.model_dump(),
                 "friendly_response": friendly,
@@ -888,7 +886,6 @@ def build_query_pipeline(
 
         total = sum(timings.values())
         print(f"Pipeline total: {total:.2f}s | {timings}")
-        _emit("done", {"timings": timings, "total": total})
         return {
             "answer": execution.model_dump(),
             "friendly_response": friendly,

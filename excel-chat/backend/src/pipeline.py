@@ -360,91 +360,37 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
 
     You have access to {len(sheets)} sheet(s): {', '.join(sheet_names)}
 
-    You have two main tools:
-    1. retrieve_values — fetch value(s) for a field across one or more years.
-       Pass a list of years: ["2023"] for a single year, or ["2020", "2021", "2022"] for multiple.
-       If a sheet name is provided, searches only that sheet.
-       If no sheet name is provided, searches all sheets and returns all matching values.
-       For a single year, returns a string like "1500.0" or "Sheet1: 1500.0; Sheet2: 1300.0".
-       For multiple years, returns a JSON object like {{"2018": 1500.0, "2019": 1200.0}} for single-sheet
-       mode, or {{"2018": {{"Sheet1": 1500.0, "Sheet2": 1300.0}}}} for cross-sheet mode.
-    2. execute_python_code — run Python code in a secure sandbox to perform ANY calculation
+    ## Tools:
+    1. retrieve_values(field, years: list[str], sheet="") — fetch value(s) for a field.
+       Single year ["2023"] → string like "1500.0". Multiple years ["2020","2021"] → JSON dict like {{"2020": 1500.0}}.
+       No sheet name → searches all sheets.
+    2. execute_python_code — run Python in a sandbox for ANY calculation.
+       Supports: math module, builtins (abs, round, min, max, sum, len, sorted),
+       NumPy (np_mean, np_std, np_median, np_sum, np_percentile, np_diff, np_sqrt, etc.),
+       Pandas (pd_describe, pd_value_counts, pd_rolling_mean, np_histogram).
+    3. EDA tools: analyze_sheet, find_missing_data, discover_column_types, get_sheet_shape,
+       group_summary_stats, create_pivot_table, crosstab_analysis, drop_missing_columns,
+       convert_to_numerical, correlation_analysis, get_sheet_head, get_sheet_info,
+       value_counts_analysis, deduplicate_rows, get_sheet_dtypes.
+       Use these for data quality, distributions, correlations, or summary questions.
 
-    You also have EDA (exploratory data analysis) tools for DataFrame-level inspection:
-    3. analyze_sheet(sheet_name) — comprehensive EDA: dimensions, describe(), duplicates, per-column stats
-    4. find_missing_data(sheet_name) — missing data report (counts and percentages per column)
-    5. discover_column_types(sheet_name) — classify columns as categorical/discrete/continuous
-    6. get_sheet_shape(sheet_name) — return row x column dimensions
-    7. group_summary_stats(sheet_name, group_col, value_col) — groupby with count/sum/mean/median/std/min/max
-    8. create_pivot_table(sheet_name, index, columns, values) — pivot table with mean aggregation
-    9. crosstab_analysis(sheet_name, col1, col2, aggfunc) — cross-tabulation (aggfunc: mean/median/count/std)
-    10. drop_missing_columns(sheet_name, threshold) — drop columns with missing data above threshold fraction
-    11. convert_to_numerical(sheet_name, columns) — convert categorical columns to numerical, fill NaN with mean
-    12. correlation_analysis(sheet_name, columns) — full correlation matrix for numerical columns
-    13. get_sheet_head(sheet_name, n) — first N rows (like df.head(n))
-    14. get_sheet_info(sheet_name) — dtypes, non-null counts, memory usage (like df.info())
-    15. value_counts_analysis(sheet_name, column, normalize) — value counts for a column
-    16. deduplicate_rows(sheet_name, subset) — find and report duplicate rows
-    17. get_sheet_dtypes(sheet_name) — dtype of each column
-
-    Use EDA tools when the user asks about data quality, distributions, correlations,
-    missing values, column types, or wants a summary/overview of the data.
-    Use retrieve_values + execute_python_code for specific value lookups and calculations.
-
-    The sandbox supports:
-    - Basic Python syntax and operators (+, -, *, /, **, //, %)
-    - math module (math.sqrt, math.pow, math.log, math.exp, math.ceil, math.floor, etc.)
-    - Common builtins (abs, round, min, max, sum, len, sorted)
-    - NumPy functions: np_mean, np_std, np_median, np_var, np_min, np_max, np_sum,
-      np_percentile, np_diff, np_cumsum, np_cumprod, np_arange, np_linspace,
-      np_sqrt, np_exp, np_log, np_abs, np_round, np_dot, np_corrcoef,
-      np_argmax, np_argmin
-      (all accept Python lists or scalars and return Python floats/lists)
-    - Pandas functions: pd_series, pd_rolling_mean, pd_rolling_std,
-      pd_describe (returns dict with count/mean/std/min/25%/50%/75%/max),
-      pd_deduplicate (returns unique values), pd_value_counts (returns frequency dict),
-      np_histogram (returns counts and bin_edges)
-      (all accept Python lists and return JSON-serializable types)
-
-    Execution flow:
-    1. Call retrieve_values to get all needed values from the plan.
-       Pass multiple years in one call when you need several years for the same field.
-    2. For named operations (add, subtract, multiply, divide, return_percentage, sqrt, power,
-       log, exp, abs, negate, max, min, average, median, stdev, yoy_growth, cagr, ratio,
-       percentage_change, difference): either compute directly in Python or use execute_python_code
-    3. For compute steps: call execute_python_code with Python code that performs the full
-       calculation using the retrieved values as literal numbers
-    4. For EDA / exploratory analysis questions, use the EDA tools (analyze_sheet,
-       find_missing_data, discover_column_types, get_sheet_shape, group_summary_stats,
-       create_pivot_table, crosstab_analysis, drop_missing_columns, convert_to_numerical,
-       correlation_analysis) to inspect the DataFrame directly.
+    ## Execution flow:
+    1. Call retrieve_values for all needed values (pass multiple years in one call per field).
+    2. For named ops (add, subtract, multiply, divide, return_percentage, sqrt, power, log, exp,
+       abs, negate, max, min, average, median, stdev, yoy_growth, cagr, ratio, percentage_change,
+       difference): compute directly in Python or use execute_python_code.
+    3. For compute steps: call execute_python_code with retrieved values as literal numbers.
+       Use a `return` statement. Example: 'rev = 1500\\nexp = 800\\nreturn (rev - exp) / rev * 100'
+    4. For EDA questions, use EDA tools directly.
     5. Return the final answer as structured data.
 
-    ### CRITICAL — step_results MUST be populated:
-    The `step_results` field in your output MUST contain an entry for EVERY step in the plan,
-    including pre-populated steps. For each step key (e.g. "step1", "step2"), set its value
-    to the result of that step. For retrieve steps, use the retrieved value(s).
-    For named operations and compute steps, use the computed result.
-    Example: if the plan has step1 (retrieve), step2 (retrieve), step3 (compute),
-    then step_results should be: {{"step1": {{...}}, "step2": {{...}}, "step3": <computed_value>}}.
-    Do NOT leave step_results as an empty dict {{}}.
-
-    ### CRITICAL — friendly_response MUST use actual field names:
-    When writing the `friendly_response` field, ALWAYS refer to the actual field names from
-    the plan — never use generic phrases like "the first series" or "the second value".
-    For example, instead of "The first benefit series grew at 25.4%", write
-    "Social security benefits grew at a CAGR of 25.4%".
-    The field names are provided in the execution prompt alongside each step.
-
-    When retrieve returns multiple values (from searching all sheets), parse them carefully.
-    The format is "SheetName: value; SheetName2: value2".
-
-    When writing Python code for execute_python_code:
-    - Use the retrieved numeric values directly as literals in the code
-    - Use a `return` statement to return the final result
-    - Example: code = 'revenue = 1500000\\nexpenses = 800000\\nmargin = (revenue - expenses) / revenue * 100\\nreturn margin'
-
-    If a retrieval fails, note it and continue with what you can.
+    ### CRITICAL — step_results MUST contain EVERY step's result (never empty dict).
+    Example: plan has step1 (retrieve), step2 (retrieve), step3 (compute) →
+    step_results = {{"step1": {{...}}, "step2": {{...}}, "step3": <computed_value>}}.
+    ### CRITICAL — friendly_response MUST use actual field names from the plan, not generic phrases.
+    WRONG: "The first series grew at 25.4%". RIGHT: "Social security benefits grew at a CAGR of 25.4%".
+    When retrieve returns multiple sheet values, format is "SheetName: value; SheetName2: value2".
+    If a retrieval fails, note it and continue.
     {GUARDRAIL_SYSTEM_PROMPT}
     """
 
@@ -782,6 +728,69 @@ def build_query_pipeline(
                 cache_step_results(user_id, plan, execution)
             except Exception as e:
                 print(f"⚠️ Post-execution caching failed: {e}")
+            friendly = inject_disclaimer(_format_simple_response(query, plan, execution) or "")
+            if friendly:
+                print(f"Response: {friendly[:100]}...")
+            _emit("friendly", {"response": friendly})
+            total = sum(timings.values())
+            print(f"Pipeline total: {total:.2f}s | {timings}")
+            _emit("done", {"timings": timings, "total": total})
+            return {
+                "answer": execution.model_dump(),
+                "friendly_response": friendly,
+                "timings": timings,
+            }
+
+        # ------------------------------------------------------------------
+        # Short-circuit 2: retrieve_numbers with items but no plan steps.
+        # The planner returned a list of "Field, Year" strings instead of
+        # structured steps. Parse them and retrieve directly — no executor
+        # LLM call needed.
+        # ------------------------------------------------------------------
+        if plan.task_type == "retrieve_numbers" and plan.items and not plan.plan:
+            _emit("status", {"message": "Retrieving data from sheets…"})
+            from types import SimpleNamespace
+            ctx = SimpleNamespace(deps=deps)
+            step_results: dict[str, Any] = {}
+            final_answers: list[Any] = []
+            for i, item in enumerate(plan.items):
+                step_name = f"step{i+1}"
+                # Items are formatted as "Field, Year" or "Field, Year1, Year2, ..."
+                parts = [p.strip() for p in item.split(",")]
+                if len(parts) < 2:
+                    step_results[step_name] = f"ERROR: cannot parse item '{item}'"
+                    continue
+                field = parts[0]
+                years = parts[1:]
+                try:
+                    raw = retrieve_values(ctx, field, years, sheet="")
+                    step_results[step_name] = raw
+                    if not str(raw).startswith("ERROR"):
+                        if len(years) > 1:
+                            try:
+                                parsed = json.loads(raw)
+                                final_answers.append(parsed)
+                            except (json.JSONDecodeError, TypeError):
+                                final_answers.append(raw)
+                        else:
+                            final_answers.append(raw)
+                except Exception as e:
+                    step_results[step_name] = f"ERROR: {type(e).__name__}: {e}"
+            final_answer: Any = (
+                final_answers[0] if len(final_answers) == 1 else final_answers
+            )
+            execution = ExecutionResult(
+                step_results=step_results,
+                final_answer=final_answer,
+                explanation=(
+                    f"Retrieved {len(final_answers)} value(s) directly from "
+                    "the DataFrame (no executor LLM call required)."
+                ),
+                friendly_response="",
+            )
+            _emit("pre_populated", {"values": step_results})
+            _emit("status", {"message": "All values retrieved — preparing answer…"})
+            print(f"Skipped executor — retrieve_numbers with {len(plan.items)} items, no plan steps.")
             friendly = inject_disclaimer(_format_simple_response(query, plan, execution) or "")
             if friendly:
                 print(f"Response: {friendly[:100]}...")

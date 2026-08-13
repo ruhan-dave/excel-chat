@@ -712,6 +712,9 @@ async def query_stream(
                     if thread_id:
                         try:
                             msg_id = str(uuid.uuid4())
+                            full_result_str = cached_response if isinstance(cached_response, str) else json.dumps(cached_response)
+
+                            # Save user message (the query)
                             save_message(
                                 message_id=msg_id,
                                 thread_id=thread_id,
@@ -719,11 +722,25 @@ async def query_stream(
                                 role="user",
                                 content=query,
                                 query=query,
-                                friendly_response=cached_friendly or "",
-                                full_result=cached_response if isinstance(cached_response, str) else json.dumps(cached_response),
                                 sheet_ids=sheet_ids,
                                 cached=1,
                             )
+
+                            # Save assistant message (the cached answer)
+                            assistant_msg_id = str(uuid.uuid4())
+                            save_message(
+                                message_id=assistant_msg_id,
+                                thread_id=thread_id,
+                                user_id=user_id,
+                                role="assistant",
+                                content=cached_friendly or "",
+                                query=query,
+                                friendly_response=cached_friendly or "",
+                                full_result=full_result_str,
+                                sheet_ids=sheet_ids,
+                                cached=1,
+                            )
+
                             auto_title_thread(thread_id, query)
                         except Exception as e:
                             print(f"⚠️ Failed to save cached message to thread: {e}")
@@ -843,6 +860,9 @@ async def query_stream(
                 try:
                     message_id = str(uuid.uuid4())
                     friendly_text = result.get("friendly_response", "") if isinstance(result, dict) else ""
+                    full_result_json = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+
+                    # Save user message (the query)
                     save_message(
                         message_id=message_id,
                         thread_id=thread_id,
@@ -850,11 +870,25 @@ async def query_stream(
                         role="user",
                         content=query,
                         query=query,
-                        friendly_response=friendly_text,
-                        full_result=json.dumps(result, default=str) if isinstance(result, dict) else str(result),
                         sheet_ids=sheet_ids,
                         cached=1 if is_cached else 0,
                     )
+
+                    # Save assistant message (the answer)
+                    assistant_message_id = str(uuid.uuid4())
+                    save_message(
+                        message_id=assistant_message_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=friendly_text,
+                        query=query,
+                        friendly_response=friendly_text,
+                        full_result=full_result_json,
+                        sheet_ids=sheet_ids,
+                        cached=1 if is_cached else 0,
+                    )
+
                     auto_title_thread(thread_id, query)
                 except Exception as e:
                     print(f"⚠️ Failed to save message to thread: {e}")

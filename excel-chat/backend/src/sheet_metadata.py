@@ -143,6 +143,7 @@ def init_db() -> None:
         ("sheets", "user_id", "ALTER TABLE sheets ADD COLUMN user_id TEXT DEFAULT 'anonymous'"),
         ("llm_cache", "user_id", "ALTER TABLE llm_cache ADD COLUMN user_id TEXT DEFAULT 'anonymous'"),
         ("llm_cache", "embedding_json", "ALTER TABLE llm_cache ADD COLUMN embedding_json TEXT DEFAULT NULL"),
+        ("llm_cache", "query_text", "ALTER TABLE llm_cache ADD COLUMN query_text TEXT DEFAULT NULL"),
     ]
     for table, col, ddl in migrations:
         existing = {
@@ -613,14 +614,17 @@ def set_cached_response(
 
     If ``embedding`` is provided (a list of floats), it's stored alongside the
     response so the semantic cache layer can do vector similarity lookups.
+    The original ``prompt`` text is also stored for deterministic year/number
+    matching during cache lookup.
     """
     key = _cache_key(model, prompt)
     embedding_json = json.dumps(embedding) if embedding is not None else None
     conn = _get_db()
     conn.execute(
         "INSERT OR REPLACE INTO llm_cache "
-        "(cache_key, response, model, user_id, embedding_json) VALUES (?, ?, ?, ?, ?)",
-        (key, response, model, user_id, embedding_json),
+        "(cache_key, response, model, user_id, embedding_json, query_text) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (key, response, model, user_id, embedding_json, prompt),
     )
     conn.commit()
     conn.close()
@@ -682,21 +686,22 @@ def get_cache_stats(user_id: str | None = None) -> dict:
     }
 
 
-def list_user_embeddings(user_id: str) -> list[tuple[str, str, list[float]]]:
-    """Return ``(cache_key, response, embedding)`` tuples for a user.
+def list_user_embeddings(user_id: str) -> list[tuple[str, str, list[float], str | None]]:
+    """Return ``(cache_key, response, embedding, query_text)`` tuples for a user.
 
     Used by the SQLite fallback in semantic_cache.find_similar_cached() to do
-    cosine-similarity search in NumPy. Returns an empty list if the user has
-    no entries with embeddings.
+    cosine-similarity search in NumPy. ``query_text`` is the original prompt
+    text, used for deterministic year/number matching. Returns an empty list
+    if the user has no entries with embeddings.
     """
     conn = _get_db()
     rows = conn.execute(
-        "SELECT cache_key, response, embedding_json FROM llm_cache "
+        "SELECT cache_key, response, embedding_json, query_text FROM llm_cache "
         "WHERE user_id = ? AND embedding_json IS NOT NULL",
         (user_id,),
     ).fetchall()
     conn.close()
-    out: list[tuple[str, str, list[float]]] = []
+    out: list[tuple[str, str, list[float], str | None]] = []
     for r in rows:
         try:
             emb = json.loads(r["embedding_json"])
@@ -704,7 +709,7 @@ def list_user_embeddings(user_id: str) -> list[tuple[str, str, list[float]]]:
             continue
         if not emb:
             continue
-        out.append((r["cache_key"], r["response"], emb))
+        out.append((r["cache_key"], r["response"], emb, r["query_text"]))
     return out
 
 

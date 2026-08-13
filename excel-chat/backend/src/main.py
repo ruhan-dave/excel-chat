@@ -490,7 +490,7 @@ async def query_rag(
             with timed("semantic_cache_lookup", timings):
                 query_embedding = embed_query(query)
                 cached_response, similarity = find_similar_cached(
-                    user_id, query_embedding, threshold=0.88
+                    user_id, query_embedding, threshold=0.88, query_text=query
                 )
             if cached_response is not None:
                 print(
@@ -692,7 +692,7 @@ async def query_stream(
             try:
                 query_embedding = embed_query(query)
                 cached_response, similarity = find_similar_cached(
-                    user_id, query_embedding, threshold=0.88
+                    user_id, query_embedding, threshold=0.88, query_text=query
                 )
                 if cached_response is not None:
                     is_cached = True
@@ -894,7 +894,8 @@ async def query_stream(
                     print(f"⚠️ Failed to save message to thread: {e}")
 
             # Emit done event with message_id if persisted
-            done_payload = {"timings": result.get("timings", {}) if isinstance(result, dict) else {}, "total": result.get("total_time", 0) if isinstance(result, dict) else 0}
+            timings = result.get("timings", {}) if isinstance(result, dict) else {}
+            done_payload = {"timings": timings, "total": sum(timings.values()) if isinstance(timings, dict) else 0}
             if message_id:
                 done_payload["message_id"] = message_id
             yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"

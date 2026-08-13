@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from typing import Any
 
@@ -169,16 +170,69 @@ def _ensure_redis_index(r: Any) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _extract_years(text: str) -> set[str]:
+    """Extract 4-digit year-like numbers from text.
+
+    Matches years in the range 1900-2099. Returns a set of string
+    representations so that ``"2020"`` and ``2020`` compare equal.
+    """
+    return set(re.findall(r"\b(19\d{2}|20\d{2})\b", text))
+
+
+def _extract_numbers(text: str) -> set[str]:
+    """Extract all standalone numbers (integers and floats) from text.
+
+    Returns a set of canonical string forms (e.g. ``"3.5"``, ``"42"``).
+    Excludes 4-digit years (handled by ``_extract_years``).
+    """
+    nums = set()
+    for match in re.finditer(r"(?<!\w)(\d+\.?\d*)(?!\w)", text):
+        val = match.group(1)
+        # Skip 4-digit years — they're handled separately
+        if re.fullmatch(r"19\d{2}|20\d{2}", val):
+            continue
+        try:
+            # Normalize: int if whole number, float otherwise
+            f = float(val)
+            if f == int(f) and "." not in val:
+                nums.add(str(int(f)))
+            else:
+                nums.add(str(f))
+        except ValueError:
+            continue
+    return nums
+
+
+def _numbers_match(query_nums: set[str], cached_nums: set[str]) -> bool:
+    """Deterministic exact-match check for numbers and years.
+
+    Returns True if the sets are identical. If the *query* has no
+    numbers/years (e.g. ``query_text`` was not provided), no numeric
+    constraint is enforced — the semantic similarity handles it alone.
+    """
+    if not query_nums:
+        return True
+    return query_nums == cached_nums
+
+
 def find_similar_cached(
     user_id: str,
     query_embedding: np.ndarray | None,
     threshold: float = 0.88,
+    query_text: str = "",
 ) -> tuple[str | None, float]:
     """Look up a cached response whose embedding is similar to ``query_embedding``.
 
     Returns ``(response, similarity_score)``. ``response`` is None on miss.
     ``similarity_score`` is 0.0 on miss and 1.0 on a perfect match (cosine
     similarity range: 0.0 → 1.0 for non-negative vectors like MiniLM).
+
+    **Two-stage matching:**
+    1. Deterministic: years and numbers extracted from ``query_text`` must
+       exactly match those from the cached query. This prevents "2020-2023"
+       from matching a cached "2015-2020".
+    2. Semantic: the remaining text (field names, intent) is matched via
+       embedding cosine similarity above ``threshold``.
 
     The user's namespace is always filtered — there is no way for another
     user's cached entry to leak through.
@@ -188,22 +242,32 @@ def find_similar_cached(
     if not user_id:
         user_id = "anonymous"
 
+    query_years = _extract_years(query_text)
+    query_numbers = _extract_numbers(query_text)
+
     # Try Redis Stack first.
     try:
         r = _get_redis()
         if r is not None and _ensure_redis_index(r):
             qvec = query_embedding.astype(np.float32).tobytes()
+            # Fetch top 5 candidates so we can filter by year/number match
             res = r.ft(_REDIS_INDEX).search(
                 f"@user_id:{{{user_id}}}",
-                vector={"field": "embedding", "vec": qvec, "k": 1},
+                vector={"field": "embedding", "vec": qvec, "k": 5},
             )
             if res and res.docs:
-                top = res.docs[0]
-                # RediSearch returns distance, not similarity. For COSINE on
-                # L2-normalized vectors, distance = 1 - similarity.
-                distance = float(getattr(top, "vector_distance", 1.0) or 1.0)
-                similarity = 1.0 - distance
-                if similarity >= threshold:
+                for top in res.docs:
+                    distance = float(getattr(top, "vector_distance", 1.0) or 1.0)
+                    similarity = 1.0 - distance
+                    if similarity < threshold:
+                        continue
+                    cached_query = getattr(top, "query", None) or ""
+                    cached_years = _extract_years(cached_query)
+                    cached_numbers = _extract_numbers(cached_query)
+                    if not _numbers_match(query_years, cached_years):
+                        continue
+                    if not _numbers_match(query_numbers, cached_numbers):
+                        continue
                     return top.response, similarity
             return None, 0.0
     except Exception as e:
@@ -228,7 +292,16 @@ def find_similar_cached(
     best_key = None
     best_response = None
     best_score = 0.0
-    for cache_key, response, emb in rows:
+    for cache_key, response, emb, cached_query in rows:
+        # Stage 1: deterministic year/number match
+        cached_years = _extract_years(cached_query or "")
+        cached_numbers = _extract_numbers(cached_query or "")
+        if not _numbers_match(query_years, cached_years):
+            continue
+        if not _numbers_match(query_numbers, cached_numbers):
+            continue
+
+        # Stage 2: semantic similarity on the non-numeric text
         try:
             v = np.asarray(emb, dtype=np.float64)
         except (TypeError, ValueError):
@@ -282,6 +355,7 @@ def store_cached(
                 "model": model,
                 "response": response,
             }
+            # Store query text for deterministic year/number matching on lookup
             if emb_list is not None:
                 payload["embedding"] = np.asarray(emb_list, dtype=np.float32).tobytes()
             r.hset(rkey, mapping=payload)

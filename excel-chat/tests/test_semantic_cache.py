@@ -75,6 +75,8 @@ def fake_model(monkeypatch):
         "2022 revenue": np.array([0.95, 0.05, 0.0, 0.0]),  # near-paraphrase
         "show me revenue for fy2022": np.array([0.97, 0.0, 0.03, 0.0]),
         "what was the revenue": np.array([0.99, 0.0, 0.0, 0.01]),
+        "revenue in 2023": np.array([0.98, 0.0, 0.0, 0.02]),  # same direction, diff year
+        "revenue in 2021": np.array([0.97, 0.01, 0.0, 0.02]),  # same direction, diff year
         # employees direction
         "employee count": np.array([0.0, 0.0, 1.0, 0.0]),
         "how many employees": np.array([0.05, 0.0, 0.97, 0.0]),
@@ -192,6 +194,59 @@ def test_find_similar_cached_returns_none_for_unrelated_query(
 
     assert cached is None
     assert score < 0.92
+
+
+def test_find_similar_cached_rejects_different_years(temp_sheet_db, fake_model):
+    """A query for 2022 revenue must NOT hit a cache of 2023 revenue even
+    if the embedding similarity is high — the years differ deterministically."""
+    import semantic_cache
+
+    user_id = "alice"
+    cached_query = "revenue in 2022"
+    response = "Revenue was $4.2M in 2022."
+    emb = semantic_cache.embed_query(cached_query)
+    semantic_cache.store_cached(
+        user_id=user_id,
+        query=cached_query,
+        query_embedding=emb,
+        response=response,
+        model="test-model",
+    )
+
+    # Paraphrase with a DIFFERENT year — should NOT hit cache.
+    new_query = "revenue in 2023"
+    new_emb = semantic_cache.embed_query(new_query)
+    cached, score = semantic_cache.find_similar_cached(
+        user_id, new_emb, threshold=0.88, query_text=new_query
+    )
+
+    assert cached is None, f"Should not hit cache for different years (score={score:.3f})"
+
+
+def test_find_similar_cached_matches_same_years_paraphrase(temp_sheet_db, fake_model):
+    """'revenue in 2022' and '2022 revenue' must hit cache — same years."""
+    import semantic_cache
+
+    user_id = "alice"
+    cached_query = "revenue in 2022"
+    response = "Revenue was $4.2M in 2022."
+    emb = semantic_cache.embed_query(cached_query)
+    semantic_cache.store_cached(
+        user_id=user_id,
+        query=cached_query,
+        query_embedding=emb,
+        response=response,
+        model="test-model",
+    )
+
+    # Paraphrase with same year — should hit cache.
+    new_query = "2022 revenue"
+    new_emb = semantic_cache.embed_query(new_query)
+    cached, score = semantic_cache.find_similar_cached(
+        user_id, new_emb, threshold=0.88, query_text=new_query
+    )
+
+    assert cached == response, f"Should hit cache for same years (score={score:.3f})"
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +446,7 @@ def test_sqlite_fallback_round_trip(temp_sheet_db, fake_model):
     from sheet_metadata import list_user_embeddings
     rows = list_user_embeddings("u1")
     assert len(rows) == 1
-    cache_key, response, stored_emb = rows[0]
+    cache_key, response, stored_emb, query_text = rows[0]
     assert response == "ok"
     # The stored embedding must be a list of floats with the same dim as the
     # original vector.

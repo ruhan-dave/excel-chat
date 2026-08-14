@@ -203,16 +203,64 @@ def _extract_numbers(text: str) -> set[str]:
     return nums
 
 
-def _numbers_match(query_nums: set[str], cached_nums: set[str]) -> bool:
-    """Deterministic exact-match check for numbers and years.
+def _extract_columns(text: str) -> set[str]:
+    """Extract likely column/field names from query text.
 
-    Returns True if the sets are identical. If the *query* has no
-    numbers/years (e.g. ``query_text`` was not provided), no numeric
-    constraint is enforced — the semantic similarity handles it alone.
+    Strips years, numbers, and common stop words to isolate the
+    financial field names (e.g. "revenue", "interest expense",
+    "employment-related social benefits").
     """
-    if not query_nums:
-        return True
-    return query_nums == cached_nums
+    # Remove years and standalone numbers
+    cleaned = re.sub(r"\b(19\d{2}|20\d{2})\b", "", text)
+    cleaned = re.sub(r"(?<!\w)\d+\.?\d*(?!\w)", "", cleaned)
+
+    # Remove common question words/phrases
+    stop_words = {
+        "what", "is", "the", "was", "were", "in", "for", "of", "to", "and",
+        "from", "between", "by", "a", "an", "how", "much", "did", "do",
+        "does", "show", "me", "tell", "examine", "data", "which", "year",
+        "had", "has", "have", "lowest", "highest", "average", "annual",
+        "total", "sum", "calculate", "find", "give", "please", "compare",
+        "difference", "growth", "rate", "change", "over", "period",
+        "expense", "expenses", "on", "about", "query", "question",
+        "each", "all", "values", "value", "get",
+    }
+
+    # Split on non-alphanumeric (keep hyphens within words)
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z\-]+", cleaned.lower())
+    columns = {t for t in tokens if t not in stop_words and len(t) > 2}
+
+    return columns
+
+
+def _deterministic_match(
+    query_years: set[str],
+    cached_years: set[str],
+    query_numbers: set[str],
+    cached_numbers: set[str],
+    query_columns: set[str],
+    cached_columns: set[str],
+) -> bool:
+    """Guarantee stage: verify years, numbers, and column names match exactly.
+
+    If the *query* has no years/numbers (e.g. ``query_text`` was not
+    provided), that specific check is skipped — the semantic similarity
+    handles it alone. Column names are always checked when both sets
+    are non-empty.
+    """
+    # Years must match exactly (if query specifies years)
+    if query_years and query_years != cached_years:
+        return False
+
+    # Non-year numbers must match exactly (if query specifies numbers)
+    if query_numbers and query_numbers != cached_numbers:
+        return False
+
+    # Column/field names must match (if both have columns)
+    if query_columns and cached_columns and query_columns != cached_columns:
+        return False
+
+    return True
 
 
 def find_similar_cached(
@@ -228,11 +276,12 @@ def find_similar_cached(
     similarity range: 0.0 → 1.0 for non-negative vectors like MiniLM).
 
     **Two-stage matching:**
-    1. Deterministic: years and numbers extracted from ``query_text`` must
-       exactly match those from the cached query. This prevents "2020-2023"
-       from matching a cached "2015-2020".
-    2. Semantic: the remaining text (field names, intent) is matched via
-       embedding cosine similarity above ``threshold``.
+    1. Semantic: embedding cosine similarity above ``threshold`` (broad
+       filter — finds paraphrased queries about the same topic).
+    2. Deterministic guarantee: years, numbers, and column/field names
+       extracted from both queries must match exactly. This prevents
+       "2020-2023" from matching a cached "2015-2020" even at 97%
+       semantic similarity.
 
     The user's namespace is always filtered — there is no way for another
     user's cached entry to leak through.
@@ -244,13 +293,14 @@ def find_similar_cached(
 
     query_years = _extract_years(query_text)
     query_numbers = _extract_numbers(query_text)
+    query_columns = _extract_columns(query_text)
 
     # Try Redis Stack first.
     try:
         r = _get_redis()
         if r is not None and _ensure_redis_index(r):
             qvec = query_embedding.astype(np.float32).tobytes()
-            # Fetch top 5 candidates so we can filter by year/number match
+            # Stage 1: semantic similarity — fetch top 5 candidates
             res = r.ft(_REDIS_INDEX).search(
                 f"@user_id:{{{user_id}}}",
                 vector={"field": "embedding", "vec": qvec, "k": 5},
@@ -261,12 +311,16 @@ def find_similar_cached(
                     similarity = 1.0 - distance
                     if similarity < threshold:
                         continue
+                    # Stage 2: deterministic guarantee
                     cached_query = getattr(top, "query", None) or ""
                     cached_years = _extract_years(cached_query)
                     cached_numbers = _extract_numbers(cached_query)
-                    if not _numbers_match(query_years, cached_years):
-                        continue
-                    if not _numbers_match(query_numbers, cached_numbers):
+                    cached_columns = _extract_columns(cached_query)
+                    if not _deterministic_match(
+                        query_years, cached_years,
+                        query_numbers, cached_numbers,
+                        query_columns, cached_columns,
+                    ):
                         continue
                     return top.response, similarity
             return None, 0.0
@@ -293,15 +347,7 @@ def find_similar_cached(
     best_response = None
     best_score = 0.0
     for cache_key, response, emb, cached_query in rows:
-        # Stage 1: deterministic year/number match
-        cached_years = _extract_years(cached_query or "")
-        cached_numbers = _extract_numbers(cached_query or "")
-        if not _numbers_match(query_years, cached_years):
-            continue
-        if not _numbers_match(query_numbers, cached_numbers):
-            continue
-
-        # Stage 2: semantic similarity on the non-numeric text
+        # Stage 1: semantic similarity (broad filter)
         try:
             v = np.asarray(emb, dtype=np.float64)
         except (TypeError, ValueError):
@@ -310,6 +356,20 @@ def find_similar_cached(
         if v_norm == 0.0:
             continue
         score = float(np.dot(q, v) / (q_norm * v_norm))
+        if score < threshold:
+            continue
+
+        # Stage 2: deterministic guarantee (years, numbers, columns)
+        cached_years = _extract_years(cached_query or "")
+        cached_numbers = _extract_numbers(cached_query or "")
+        cached_columns = _extract_columns(cached_query or "")
+        if not _deterministic_match(
+            query_years, cached_years,
+            query_numbers, cached_numbers,
+            query_columns, cached_columns,
+        ):
+            continue
+
         if score > best_score:
             best_score = score
             best_key = cache_key

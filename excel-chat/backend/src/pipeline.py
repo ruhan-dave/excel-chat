@@ -488,21 +488,43 @@ def _format_simple_response(query: str, plan: QueryPlan, execution: ExecutionRes
     final = execution.final_answer
     explanation = execution.explanation or ""
 
-    # Case 1: retrieve_numbers with 1-2 items
+    # Case 1: retrieve_numbers with items
     if plan.task_type == "retrieve_numbers" and plan.items:
-        if len(plan.items) <= 2:
-            parts = []
-            for item in plan.items:
-                fields = [f.strip() for f in item.split(",")]
-                if len(fields) == 2:
-                    field_name, year = fields
-                    val = final if len(plan.items) == 1 else step_results.get(f"item_{fields[0]}_{fields[1]}", final)
-                    parts.append(f"{field_name} in {year}: {val}")
-                elif len(fields) == 3:
-                    sheet_name, field_name, year = fields
-                    parts.append(f"{field_name} in {year} ({sheet_name}): {final}")
-            if parts:
-                return "  |  ".join(parts)
+        parts = []
+        for i, item in enumerate(plan.items):
+            fields = [f.strip() for f in item.split(",")]
+            step_name = f"step{i+1}"
+            if len(fields) == 2:
+                field_name, year = fields
+                val = step_results.get(step_name, final)
+                parts.append(f"{field_name} in {year}: {val}")
+            elif len(fields) == 3:
+                sheet_name, field_name, year = fields
+                val = step_results.get(step_name, final)
+                parts.append(f"{field_name} in {year} ({sheet_name}): {val}")
+        if parts:
+            return "\n".join(parts)
+
+        # Multi-item same field: format as a list of year: value pairs
+        if len(plan.items) > 2:
+            # Try to parse step_results as JSON dicts (retrieve_values returns JSON)
+            all_values: dict[str, Any] = {}
+            for i, item in enumerate(plan.items):
+                step_name = f"step{i+1}"
+                raw = step_results.get(step_name, "")
+                if isinstance(raw, str) and not raw.startswith("ERROR"):
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, dict):
+                            all_values.update(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            if all_values:
+                field_name = plan.items[0].split(",")[0].strip()
+                lines = [f"Here are the {field_name} values for each year:"]
+                for year in sorted(all_values.keys()):
+                    lines.append(f"- **{year}**: {all_values[year]}")
+                return "\n".join(lines)
 
     # Case 2: single-step plan with a clear explanation
     if plan.plan and len(plan.plan) == 1 and explanation:
@@ -752,29 +774,57 @@ def build_query_pipeline(
             ctx = SimpleNamespace(deps=deps)
             step_results: dict[str, Any] = {}
             final_answers: list[Any] = []
-            for i, item in enumerate(plan.items):
-                step_name = f"step{i+1}"
-                # Items are formatted as "Field, Year" or "Field, Year1, Year2, ..."
+
+            # Parse all items to extract (field, years) pairs
+            parsed_items: list[tuple[str, list[str]]] = []
+            for item in plan.items:
                 parts = [p.strip() for p in item.split(",")]
                 if len(parts) < 2:
-                    step_results[step_name] = f"ERROR: cannot parse item '{item}'"
+                    parsed_items.append((item, []))
                     continue
                 field = parts[0]
                 years = parts[1:]
+                parsed_items.append((field, years))
+
+            # Optimization: if all items share the same field, retrieve once
+            # with all unique years instead of N separate calls
+            all_fields = {f for f, _ in parsed_items if f}
+            if len(all_fields) == 1 and len(parsed_items) > 1:
+                field = parsed_items[0][0]
+                all_years = sorted({y for _, yrs in parsed_items for y in yrs})
                 try:
-                    raw = retrieve_values(ctx, field, years, sheet="")
-                    step_results[step_name] = raw
+                    raw = retrieve_values(ctx, field, all_years, sheet="")
+                    step_results["step1"] = raw
                     if not str(raw).startswith("ERROR"):
-                        if len(years) > 1:
-                            try:
-                                parsed = json.loads(raw)
-                                final_answers.append(parsed)
-                            except (json.JSONDecodeError, TypeError):
-                                final_answers.append(raw)
-                        else:
+                        try:
+                            parsed = json.loads(raw)
+                            final_answers.append(parsed)
+                        except (json.JSONDecodeError, TypeError):
                             final_answers.append(raw)
                 except Exception as e:
-                    step_results[step_name] = f"ERROR: {type(e).__name__}: {e}"
+                    step_results["step1"] = f"ERROR: {type(e).__name__}: {e}"
+            else:
+                # Different fields — retrieve each separately
+                for i, (field, years) in enumerate(parsed_items):
+                    step_name = f"step{i+1}"
+                    if not years:
+                        step_results[step_name] = f"ERROR: cannot parse item '{plan.items[i]}'"
+                        continue
+                    try:
+                        raw = retrieve_values(ctx, field, years, sheet="")
+                        step_results[step_name] = raw
+                        if not str(raw).startswith("ERROR"):
+                            if len(years) > 1:
+                                try:
+                                    parsed = json.loads(raw)
+                                    final_answers.append(parsed)
+                                except (json.JSONDecodeError, TypeError):
+                                    final_answers.append(raw)
+                            else:
+                                final_answers.append(raw)
+                    except Exception as e:
+                        step_results[step_name] = f"ERROR: {type(e).__name__}: {e}"
+
             final_answer: Any = (
                 final_answers[0] if len(final_answers) == 1 else final_answers
             )
@@ -790,7 +840,32 @@ def build_query_pipeline(
             _emit("pre_populated", {"values": step_results})
             _emit("status", {"message": "All values retrieved — preparing answer…"})
             print(f"Skipped executor — retrieve_numbers with {len(plan.items)} items, no plan steps.")
-            friendly = inject_disclaimer(_format_simple_response(query, plan, execution) or "")
+
+            # Format friendly response from the retrieved data
+            friendly_text = ""
+            if final_answers:
+                # If we got a dict (from deduplicated retrieval), format as year: value list
+                first = final_answers[0]
+                if isinstance(first, dict):
+                    field_name = parsed_items[0][0] if parsed_items else "value"
+                    lines = [f"Here are the {field_name} values for each year:"]
+                    for year in sorted(first.keys()):
+                        lines.append(f"- **{year}**: {first[year]}")
+                    friendly_text = "\n".join(lines)
+                elif len(final_answers) == 1:
+                    field_name = parsed_items[0][0] if parsed_items else "value"
+                    year = parsed_items[0][1][0] if parsed_items and parsed_items[0][1] else ""
+                    friendly_text = f"{field_name} in {year}: {first}"
+                else:
+                    # Multiple different fields
+                    parts = []
+                    for i, ans in enumerate(final_answers):
+                        field_name = parsed_items[i][0] if i < len(parsed_items) else f"item{i+1}"
+                        year = parsed_items[i][1][0] if i < len(parsed_items) and parsed_items[i][1] else ""
+                        parts.append(f"{field_name} in {year}: {ans}")
+                    friendly_text = "\n".join(parts)
+
+            friendly = inject_disclaimer(friendly_text)
             if friendly:
                 print(f"Response: {friendly[:100]}...")
             _emit("friendly", {"response": friendly})

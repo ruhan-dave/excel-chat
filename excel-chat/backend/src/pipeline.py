@@ -788,11 +788,11 @@ def build_query_pipeline(
 
             # Optimization: if all items share the same field, retrieve once
             # with all unique years instead of N separate calls
-            all_fields: set[str] = set()
+            item_fields: set[str] = set()
             for f, _ in parsed_items:
                 if f:
-                    all_fields.add(f)
-            if len(all_fields) == 1 and len(parsed_items) > 1:
+                    item_fields.add(f)
+            if len(item_fields) == 1 and len(parsed_items) > 1:
                 field = parsed_items[0][0]
                 all_years = sorted({y for _, yrs in parsed_items for y in yrs})
                 try:

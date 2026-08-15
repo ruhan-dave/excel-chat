@@ -367,6 +367,17 @@ async def _finalize_upload(
     }
 
 
+@app.post("/cache/clear")
+async def clear_cache(x_user_id: str | None = None):
+    """Clear all cached responses for a user."""
+    user_id = x_user_id or "anonymous"
+    try:
+        deleted = semantic_invalidate_user_cache(user_id)
+        return {"message": f"Cleared {deleted} cache entries", "user_id": user_id}
+    except Exception as e:
+        return JSONResponse(content={"message": f"Cache clear failed: {e}"}, status_code=500)
+
+
 # ============================================================================
 # Sheet Description (User-Provided)
 # ============================================================================

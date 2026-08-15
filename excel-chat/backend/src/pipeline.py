@@ -775,16 +775,24 @@ def build_query_pipeline(
             step_results: dict[str, Any] = {}
             final_answers: list[Any] = []
 
-            # Parse all items to extract (field, years) pairs
+            # Parse all items to extract (field, years) pairs.
+            # Planner items can be:
+            #   "Field, Year"                    → 2 parts
+            #   "Category, Subcategory, Year"    → 3 parts (e.g. "Grants, To foreign governments, 2015")
+            #   "Sheet, Field, Year"             → 3 parts
+            # The last part is always the year; the second-to-last is the field name.
             parsed_items: list[tuple[str, list[str]]] = []
             for item in plan.items:
                 parts = [p.strip() for p in item.split(",")]
                 if len(parts) < 2:
                     parsed_items.append((item, []))
                     continue
-                field = parts[0]
-                years = parts[1:]
-                parsed_items.append((field, years))
+                year = parts[-1]
+                field = parts[-2]
+                # If there are 4+ parts, join middle parts as the field name
+                if len(parts) > 3:
+                    field = ", ".join(parts[1:-1])
+                parsed_items.append((field, [year]))
 
             # Optimization: if all items share the same field, retrieve once
             # with all unique years instead of N separate calls
@@ -794,9 +802,9 @@ def build_query_pipeline(
                     item_fields.add(f)
             if len(item_fields) == 1 and len(parsed_items) > 1:
                 field = parsed_items[0][0]
-                all_years = sorted({y for _, yrs in parsed_items for y in yrs})
+                item_years = sorted({y for _, yrs in parsed_items for y in yrs})
                 try:
-                    raw = retrieve_values(ctx, field, all_years, sheet="")
+                    raw = retrieve_values(ctx, field, item_years, sheet="")
                     step_results["step1"] = raw
                     if not str(raw).startswith("ERROR"):
                         try:
@@ -847,25 +855,26 @@ def build_query_pipeline(
             # Format friendly response from the retrieved data
             friendly_text = ""
             if final_answers:
-                # If we got a dict (from deduplicated retrieval), format as year: value list
+                # Deduplicated case: single dict with multiple years
                 first = final_answers[0]
-                if isinstance(first, dict):
+                if isinstance(first, dict) and len(final_answers) == 1:
                     field_name = parsed_items[0][0] if parsed_items else "value"
                     lines = [f"Here are the {field_name} values for each year:"]
                     for year in sorted(first.keys()):
                         lines.append(f"- **{year}**: {first[year]}")
                     friendly_text = "\n".join(lines)
-                elif len(final_answers) == 1:
-                    field_name = parsed_items[0][0] if parsed_items else "value"
-                    year = parsed_items[0][1][0] if parsed_items and parsed_items[0][1] else ""
-                    friendly_text = f"{field_name} in {year}: {first}"
                 else:
-                    # Multiple different fields
+                    # Multiple items — each is a single-year value or dict
                     parts = []
                     for i, ans in enumerate(final_answers):
                         field_name = parsed_items[i][0] if i < len(parsed_items) else f"item{i+1}"
                         year = parsed_items[i][1][0] if i < len(parsed_items) and parsed_items[i][1] else ""
-                        parts.append(f"{field_name} in {year}: {ans}")
+                        # Extract scalar from single-year dict
+                        if isinstance(ans, dict) and len(ans) == 1:
+                            val = list(ans.values())[0]
+                        else:
+                            val = ans
+                        parts.append(f"**{field_name}** in {year}: {val}")
                     friendly_text = "\n".join(parts)
 
             friendly = inject_disclaimer(friendly_text)

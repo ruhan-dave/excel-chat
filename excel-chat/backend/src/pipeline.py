@@ -448,6 +448,31 @@ def _is_empty_response_error(exc: Exception) -> bool:
     return "empty model response" in msg or "received empty" in msg
 
 
+def _is_fallback_worthy_error(exc: Exception) -> bool:
+    """Check whether *exc* warrants a fallback to the secondary model.
+
+    Catches:
+    - Empty model responses (pydantic-ai)
+    - API/connection errors (OpenRouter 5xx, timeouts, rate limits)
+    - Validation retries exhausted (model kept returning invalid output)
+    """
+    msg = str(exc).lower()
+    if _is_empty_response_error(exc):
+        return True
+    # Connection / server errors
+    if any(kw in msg for kw in (
+        "connection", "timeout", "timed out",
+        "502", "503", "504", "500",
+        "rate limit", "rate_limit", "too many requests",
+        "service unavailable", "bad gateway", "internal server error",
+    )):
+        return True
+    # pydantic-ai validation retries exhausted
+    if "maximum retries" in msg and "validation" in msg:
+        return True
+    return False
+
+
 async def _run_with_fallback(
     build_agent: Callable[..., Agent],
     prompt: str,
@@ -455,11 +480,12 @@ async def _run_with_fallback(
     deps: Any = None,
     **kwargs,
 ) -> Any:
-    """Run an agent, retrying with the fallback model on empty-response errors.
+    """Run an agent, retrying with the fallback model on recoverable errors.
 
     *build_agent* is called with *args* and **kwargs to create the primary
-    agent. If the primary agent's ``run`` raises an empty-response error, the
-    same builder is called with ``model_name=FALLBACK_MODEL`` and retried.
+    agent. If the primary agent's ``run`` raises a fallback-worthy error
+    (empty response, server error, timeout, rate limit), the same builder
+    is called with ``model_name=FALLBACK_MODEL`` and retried.
     """
     agent = build_agent(*args, **kwargs)
     try:
@@ -467,9 +493,9 @@ async def _run_with_fallback(
             return await agent.run(prompt, deps=deps)
         return await agent.run(prompt)
     except Exception as exc:
-        if not _is_empty_response_error(exc):
+        if not _is_fallback_worthy_error(exc):
             raise
-        print(f"⚠️ Primary model returned empty response, retrying with {FALLBACK_MODEL}…")
+        print(f"⚠️ Primary model error ({type(exc).__name__}), retrying with {FALLBACK_MODEL}…")
         fallback_agent = build_agent(*args, **kwargs, model_name=FALLBACK_MODEL)
         if deps is not None:
             return await fallback_agent.run(prompt, deps=deps)

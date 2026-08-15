@@ -306,3 +306,164 @@ Two compounding issues:
 2. **`excelservices.py:47-62`**: Added `_try_clean` helper that attempts `clean_dataframe` and falls back to returning the raw DataFrame if it's already cleaned (detected by checking for a `category` column or index). Applied to both `load_all_sheets` and `load_all_sheets_buffer`.
 
 **Files:** `excel-chat/backend/src/main.py`, `excel-chat/backend/src/excelservices.py`
+
+---
+
+## Bug 13: Fallback Model Confuses `retrieve` and `retrieve_batch` Tools
+
+**Status:** Fixed (`953e401`)
+**Date:** 2026-08-01
+**Severity:** High
+
+### Symptom
+
+When the primary model (`openai/gpt-oss-120b:nitro`) returned an empty response and the pipeline fell back to `deepseek/deepseek-v4-pro`, the fallback model would call `retrieve` with a list of years (`years`) instead of a single year string (`year`). This triggered pydantic-ai `ValidationError` — the `retrieve` tool expected `year: str` but received `years: list[str]`, and the `retrieve_batch` tool expected `years: list[str]` but received `year: str`. Integration tests (`test_trend_analysis`, `test_query_percentage_calculation`) failed intermittently depending on whether the fallback model was invoked.
+
+### Root Cause
+
+Two separate tools — `retrieve(ctx, field, year: str, sheet)` and `retrieve_batch(ctx, field, years: list[str], sheet)` — had nearly identical names, descriptions, and parameter sets. The only difference was `year` (singular string) vs `years` (plural list). The fallback model (deepseek-v4-pro) could not reliably distinguish between them and would send a list of years to `retrieve` or a single string to `retrieve_batch`, causing pydantic-ai's strict `extra_behavior: Forbid` validation to reject the call.
+
+Additionally, pydantic-ai 0.0.15 generates an internal validator from the function signature that marks **all** parameters as required regardless of Python defaults. The `prepare` function only modifies the JSON schema sent to the LLM — it does not affect the internal validation schema. So even making `year` optional in the signature did not prevent the validation error.
+
+### Fix
+
+Merged `retrieve` and `retrieve_batch` into a single unified `retrieve_values(ctx, field, years: list[str], sheet)` tool:
+
+- **Single year**: pass `["2023"]` — returns a plain string (e.g. `"1500.0"`)
+- **Multiple years**: pass `["2020", "2021", "2022"]` — returns a JSON dict (e.g. `{"2020": 1500.0, "2021": 1200.0}`)
+
+The tool internally delegates to `_retrieve_single` (one year) or `_retrieve_multi` (multiple years) helpers. There is now only one tool for the LLM to call, eliminating the confusion entirely.
+
+Also removed the now-obsolete `extract_val` tool (which was a duplicate of `retrieve` with the same signature).
+
+**Files:**
+- `excel-chat/backend/src/tools.py` — replaced `retrieve`, `extract_val`, `retrieve_batch` with `retrieve_values` + helpers; replaced three prepare functions with `_prepare_retrieve_values_tool`
+- `excel-chat/backend/src/pipeline.py` — updated imports, `PlanStep` action type (removed `retrieve_batch`), planner/executor system prompts, `_prepopulate_retrievals`, `_plan_is_pure_retrieve`, and executor prompt building
+- `excel-chat/backend/src/classification_template.py` — updated all `retrieve_batch` references to `retrieve` with multi-year args
+- `excel-chat/tests/test_optimization.py` — updated all tests to use `retrieve_values` and unified `retrieve` action
+
+---
+
+## Bug 14: Test Files Still Importing Removed `retrieve` Function After Tool Merge
+
+**Date:** 2026-08-01 (CI failure), fixed 2026-08-05
+
+**Symptom:**
+CI Backend Tests job failed with `ImportError` and `NameError` on the `agentic` branch after the `retrieve`/`retrieve_batch` merge into `retrieve_values` (Bug 13). All 5 consecutive CI runs failed.
+
+**Root Cause:**
+When `retrieve` and `retrieve_batch` were merged into the unified `retrieve_values` tool in `tools.py` and `pipeline.py`, two test files were not updated:
+- `excel-chat/tests/test_financial_questions.py:27` — imported `retrieve` from `pipeline`
+- `excel-chat/tests/test_multi_sheet.py:15` — imported `retrieve` from `pipeline`
+
+These files still called `retrieve(ctx, field, year, sheet)` with a string `year` argument, but the function no longer existed — it was replaced by `retrieve_values(ctx, field, years: list[str], sheet)`.
+
+The first CI run after the merge failed with `ImportError: cannot import name 'retrieve' from 'pipeline'` (exit code 2 — collection error). After fixing the imports, a second CI run failed with `NameError: name 'retrieve' is not defined` in `test_retrieve_not_found` (exit code 1 — one missed call site).
+
+**Fix:**
+- Updated both test files to import `retrieve_values` instead of `retrieve`
+- Updated all `retrieve(ctx, field, "2022", sheet)` calls to `retrieve_values(ctx, field, ["2022"], sheet)` (string → list)
+- Three call sites in `test_multi_sheet.py` and one in `test_financial_questions.py`
+
+**Files:**
+- `excel-chat/tests/test_financial_questions.py` — updated import and `_retrieve_val` helper
+- `excel-chat/tests/test_multi_sheet.py` — updated import and 3 `retrieve()` call sites
+
+**Lesson:** When renaming/removing a public API function, grep all test files for imports and call sites — not just the test file that was directly modified during the feature work.
+
+---
+
+## Bug 15: Short-Circuit Retrieves Wrong Field for Hierarchical Items
+
+**Status:** Fixed (`ab248c6`)
+**Date:** 2026-08-15
+**Severity:** High
+
+### Symptom
+
+Queries like "average annual expense on grants to foreign governments between 2015 and 2020" returned incorrect values — mostly 0s with only 11.48 in 2017. The actual values for "To foreign governments" were 97217.31 (2015), 112068.49 (2016), etc. The short-circuit was retrieving the parent category "Grants" instead of the subcategory "To foreign governments".
+
+### Root Cause
+
+The `retrieve_numbers` short-circuit in `pipeline.py` parsed planner items by splitting on commas and treating `parts[0]` as the field name and `parts[1:]` as years. But the planner returns hierarchical items like `"Grants, To foreign governments, 2015"` — a 3-part format where:
+- `parts[0]` = category ("Grants")
+- `parts[1]` = subcategory / actual field ("To foreign governments")
+- `parts[2]` = year ("2015")
+
+The code used `field = parts[0]` ("Grants") and `years = parts[1:]` (["To foreign governments", "2015"]), so `retrieve_values` looked up "Grants" (the parent total) instead of "To foreign governments" (the specific subcategory). This produced wrong values that were then cached and served to subsequent similar queries.
+
+Additionally, `_format_simple_response` only handled 1-2 items (returned `None` for 3+), so the `friendly_response` was empty for multi-year queries, causing the frontend to show "Failed to get response from server."
+
+### Fix
+
+**Item parsing** (`pipeline.py`): The last part is always the year; the second-to-last is the field name. For 4+ parts, join the middle parts as the field name.
+
+```python
+# Before
+field = parts[0]
+years = parts[1:]
+
+# After
+year = parts[-1]
+field = parts[-2]
+if len(parts) > 3:
+    field = ", ".join(parts[1:-1])
+```
+
+**Deduplication**: When all items share the same field (e.g. 6 items for "To foreign governments" across 2015-2020), retrieve once with all years instead of 6 separate calls.
+
+**Friendly response**: Replaced `_format_simple_response` call with inline formatting that handles both deduplicated (single dict with multiple years) and multi-item (list of single-year dicts) results.
+
+**Variable shadowing**: Renamed `all_fields`→`item_fields` and `all_years`→`item_years` in the short-circuit to avoid Python scoping errors — the enclosing `build_query_pipeline` scope already defines `all_fields` and `all_years`, and assigning to them inside `run_pipeline` makes Python treat them as local for the entire function, causing `UnboundLocalError` at the earlier `PipelineDeps` construction.
+
+**Files:** `excel-chat/backend/src/pipeline.py`
+
+---
+
+## Bug 16: Semantic Cache Returns Wrong Answers for Different Year Ranges
+
+**Status:** Fixed (`e484412`, `75c7835`)
+**Date:** 2026-08-15
+**Severity:** High
+
+### Symptom
+
+The semantic cache matched too aggressively — queries with different year ranges (e.g. "2015-2020" vs "2020-2023") would hit the cache at 97%+ semantic similarity and return the wrong cached response. Additionally, stale cache entries from Bug 15 (containing wrong values and empty `friendly_response`) persisted and kept being served even after the item parsing fix was deployed.
+
+### Root Cause
+
+The original cache lookup used only embedding cosine similarity (threshold 0.88) with no deterministic validation. Two queries about "grants to foreign governments" with different years would have very similar embeddings (0.97+ similarity) because the field names and intent are nearly identical — the only difference is the year numbers, which contribute minimally to the embedding vector.
+
+The cache had no mechanism to verify that the cached response actually answered the same question — it trusted the embedding similarity alone.
+
+### Fix
+
+**Two-stage cache matching** (`semantic_cache.py`):
+
+1. **Stage 1 — Semantic similarity (broad filter):** Embedding cosine similarity above threshold (0.88). This finds paraphrased queries about the same topic (e.g. "revenue in 2022" ≈ "2022 revenue").
+
+2. **Stage 2 — Deterministic guarantee:** Exact match on:
+   - **Years**: 4-digit years (1900-2099) extracted via regex from both query and cached query must be identical sets
+   - **Numbers**: All non-year numbers (integers, floats) must match exactly
+   - **Column/field names**: Stop-word-filtered tokens from both queries must match exactly
+
+   If the query has no years/numbers (e.g. `query_text` not provided), that specific check is skipped for backwards compatibility.
+
+**Helper functions added:**
+- `_extract_years(text)` — regex `\b(19\d{2}|20\d{2})\b`
+- `_extract_numbers(text)` — all standalone numbers, excluding years
+- `_extract_columns(text)` — strips years, numbers, and stop words to isolate field names
+- `_deterministic_match(query_years, cached_years, query_numbers, cached_numbers, query_columns, cached_columns)` — returns `False` if any deterministic check fails
+
+**Cache storage** (`sheet_metadata.py`): Added `query_text` column to `llm_cache` table (with migration) to store the original prompt text alongside the embedding, enabling deterministic matching on lookup.
+
+**Cache flush** (`main.py`): Added `POST /cache/clear` endpoint to invalidate all cached responses for a user. Used to flush 57 stale entries containing wrong values from Bug 15.
+
+**Files:**
+- `excel-chat/backend/src/semantic_cache.py` — two-stage matching, helper functions
+- `excel-chat/backend/src/sheet_metadata.py` — `query_text` column, migration, `set_cached_response`, `list_user_embeddings`
+- `excel-chat/backend/src/main.py` — pass `query_text` to `find_similar_cached`, `/cache/clear` endpoint
+- `excel-chat/tests/test_semantic_cache.py` — tests for year mismatch rejection, same-year paraphrase matching
+
+**Lesson:** Semantic similarity alone is insufficient for caching queries that differ only in numeric parameters (years, amounts). Use semantic matching as a broad filter, then apply deterministic exact matching on the structured elements (years, field names) as a guarantee.
+

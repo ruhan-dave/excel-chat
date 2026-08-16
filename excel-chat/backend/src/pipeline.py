@@ -784,6 +784,8 @@ def build_query_pipeline(
             print(f"Pipeline total: {total:.2f}s | {timings}")
             return {
                 "answer": execution.model_dump(),
+                "plan": plan.model_dump(),
+                "task_type": plan.task_type,
                 "friendly_response": friendly,
                 "timings": timings,
             }
@@ -911,6 +913,8 @@ def build_query_pipeline(
             print(f"Pipeline total: {total:.2f}s | {timings}")
             return {
                 "answer": execution.model_dump(),
+                "plan": plan.model_dump(),
+                "task_type": plan.task_type,
                 "friendly_response": friendly,
                 "timings": timings,
             }
@@ -1001,6 +1005,8 @@ def build_query_pipeline(
         print(f"Pipeline total: {total:.2f}s | {timings}")
         return {
             "answer": execution.model_dump(),
+            "plan": plan.model_dump(),
+            "task_type": plan.task_type,
             "friendly_response": friendly,
             "timings": timings,
         }

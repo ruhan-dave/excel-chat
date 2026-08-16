@@ -75,7 +75,7 @@ export function ThreadView({
                                 )}
                                 <div className="flex-1">
                                     <span className="text-sm font-medium text-slate-700">{step.label}</span>
-                                    <span className="ml-2 text-sm text-slate-500">{step.detail}</span>
+                                    <div className="text-sm text-slate-500 whitespace-pre-wrap mt-0.5">{step.detail}</div>
                                 </div>
                             </div>
                         ))}

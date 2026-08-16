@@ -111,10 +111,13 @@ export function useConversation(
                 const taskLabel = data.task_type?.replace(/_/g, " ") ?? "analysis";
                 addStep("Classified Intent", `Task type: ${taskLabel}`);
                 if (data.plan && Object.keys(data.plan).length > 0) {
-                    const stepCount = Object.keys(data.plan).length;
-                    addStep("Execution Plan", `${stepCount} step(s) planned`);
+                    const planEntries = Object.entries(data.plan) as [string, { action: string; args: string[] }][];
+                    const planText = planEntries
+                        .map(([step, info]) => `${step}: ${info.action}(${(info.args || []).join(", ")})`)
+                        .join("\n");
+                    addStep("Execution Plan", planText);
                 } else if (data.items && data.items.length > 0) {
-                    addStep("Execution Plan", `${data.items.length} item(s) to retrieve`);
+                    addStep("Execution Plan", `Items to retrieve:\n${data.items.join("\n")}`);
                 } else if (data.description) {
                     addStep("Execution Plan", data.description);
                 }
@@ -122,15 +125,26 @@ export function useConversation(
 
             es.addEventListener("pre_populated", (e: MessageEvent) => {
                 const data = JSON.parse(e.data);
-                const count = data.values ? Object.keys(data.values).length : 0;
-                addStep("Data Retrieved", `${count} value(s) fetched from sheets`);
+                const values = data.values || {};
+                const entries = Object.entries(values);
+                const valueText = entries
+                    .map(([key, val]) => `${key}: ${typeof val === "object" ? JSON.stringify(val) : String(val)}`)
+                    .join("\n");
+                addStep("Data Retrieved", valueText || "No values fetched");
             });
 
             es.addEventListener("execution", (e: MessageEvent) => {
                 const data = JSON.parse(e.data);
                 const stepResults = data.step_results || {};
-                const stepCount = Object.keys(stepResults).length;
-                addStep("Calculations Complete", `${stepCount} step(s) executed`);
+                const entries = Object.entries(stepResults);
+                const resultsText = entries
+                    .map(([key, val]) => `${key}: ${typeof val === "object" ? JSON.stringify(val) : String(val)}`)
+                    .join("\n");
+                if (data.final_answer !== undefined) {
+                    addStep("Calculations Complete", `Final answer: ${typeof data.final_answer === "object" ? JSON.stringify(data.final_answer) : String(data.final_answer)}${resultsText ? "\n\n" + resultsText : ""}`);
+                } else {
+                    addStep("Calculations Complete", resultsText || "No results");
+                }
                 setStreaming((prev) => ({ ...prev, answer: stepResults }));
             });
 

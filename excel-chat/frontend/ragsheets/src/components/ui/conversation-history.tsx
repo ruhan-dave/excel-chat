@@ -25,8 +25,10 @@ function MessageBubble({ message }: MessageBubbleProps) {
         }
     }
 
-    const plan = fullResult?.plan as Record<string, { action: string; args: string[] }> | undefined;
-    const stepResults = fullResult?.step_results as Record<string, unknown> | undefined;
+    const answerObj = fullResult?.answer as Record<string, unknown> | undefined;
+    const planObj = fullResult?.plan as Record<string, unknown> | undefined;
+    const plan = planObj?.plan as Record<string, { action: string; args: string[] }> | undefined;
+    const stepResults = answerObj?.step_results as Record<string, unknown> | undefined;
     const taskType = (fullResult?.task_type as string || "").replace(/_/g, " ");
 
     return (
@@ -48,7 +50,7 @@ function MessageBubble({ message }: MessageBubbleProps) {
                 </div>
 
                 {/* Cached badge */}
-                {message.cached && (
+                {Boolean(message.cached) && (
                     <div className={`mt-1.5 text-[10px] ${isUser ? "text-blue-100" : "text-muted-foreground"}`}>
                         ⚡ From cache
                     </div>

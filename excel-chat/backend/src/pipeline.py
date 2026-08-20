@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -473,6 +474,11 @@ def _is_fallback_worthy_error(exc: Exception) -> bool:
     return False
 
 
+class PipelineError(Exception):
+    """Raised when all model attempts (primary + fallback + retry) fail."""
+    pass
+
+
 async def _run_with_fallback(
     build_agent: Callable[..., Agent],
     prompt: str,
@@ -480,26 +486,52 @@ async def _run_with_fallback(
     deps: Any = None,
     **kwargs,
 ) -> Any:
-    """Run an agent, retrying with the fallback model on recoverable errors.
+    """Run an agent with a 3-attempt retry strategy on recoverable errors.
 
-    *build_agent* is called with *args* and **kwargs to create the primary
-    agent. If the primary agent's ``run`` raises a fallback-worthy error
-    (empty response, server error, timeout, rate limit), the same builder
-    is called with ``model_name=FALLBACK_MODEL`` and retried.
+    Attempt 1: primary model (PRIMARY_MODEL)
+    Attempt 2: fallback model (FALLBACK_MODEL)
+    Attempt 3: primary model again (after a short delay, in case of transient issues)
+
+    If all 3 attempts fail with fallback-worthy errors, raises PipelineError
+    with a user-friendly message. Non-fallback-worthy errors are re-raised
+    immediately from the first attempt.
     """
-    agent = build_agent(*args, **kwargs)
-    try:
-        if deps is not None:
-            return await agent.run(prompt, deps=deps)
-        return await agent.run(prompt)
-    except Exception as exc:
-        if not _is_fallback_worthy_error(exc):
-            raise
-        print(f"⚠️ Primary model error ({type(exc).__name__}), retrying with {FALLBACK_MODEL}…")
-        fallback_agent = build_agent(*args, **kwargs, model_name=FALLBACK_MODEL)
-        if deps is not None:
-            return await fallback_agent.run(prompt, deps=deps)
-        return await fallback_agent.run(prompt)
+    attempts = [
+        ("primary", None),       # uses PRIMARY_MODEL via build_agent default
+        ("fallback", FALLBACK_MODEL),
+        ("primary-retry", None),  # retry primary after delay
+    ]
+
+    last_exc: Exception | None = None
+
+    for i, (label, model_name) in enumerate(attempts):
+        if i > 0:
+            await asyncio.sleep(2 * i)  # brief backoff: 2s, 4s
+        try:
+            kw = dict(kwargs)
+            if model_name is not None:
+                kw["model_name"] = model_name
+            agent = build_agent(*args, **kw)
+            if deps is not None:
+                return await agent.run(prompt, deps=deps)
+            return await agent.run(prompt)
+        except Exception as exc:
+            if not _is_fallback_worthy_error(exc):
+                raise
+            last_exc = exc
+            model_label = model_name or PRIMARY_MODEL
+            print(f"⚠️ Attempt {i+1} ({label}, {model_label}) failed: {type(exc).__name__}: {exc}")
+            if i < len(attempts) - 1:
+                next_label = attempts[i + 1][0]
+                next_model = attempts[i + 1][1] or PRIMARY_MODEL
+                print(f"   Retrying with {next_label} ({next_model})…")
+            else:
+                print(f"   All {len(attempts)} attempts exhausted.")
+
+    raise PipelineError(
+        "The AI model could not process this query after multiple attempts. "
+        "Please try rephrasing your question or try again later."
+    ) from last_exc
 
 
 def _format_simple_response(query: str, plan: QueryPlan, execution: ExecutionResult) -> str | None:

@@ -648,6 +648,8 @@ async def query_rag(
         error_msg = str(e)
         if "Exceeded maximum retries" in error_msg:
             error_msg = "The AI model could not process this query. Please try rephrasing your question."
+        if "empty model response" in error_msg.lower() or "received empty" in error_msg.lower():
+            error_msg = "The AI model could not process this query after multiple attempts. Please try rephrasing your question or try again later."
         return {"error": error_msg}
 
 
@@ -918,6 +920,8 @@ async def query_stream(
             error_msg = str(e)
             if "Exceeded maximum retries" in error_msg:
                 error_msg = "The AI model could not process this query. Please try rephrasing your question."
+            if "empty model response" in error_msg.lower() or "received empty" in error_msg.lower():
+                error_msg = "The AI model could not process this query after multiple attempts. Please try rephrasing your question or try again later."
             yield f"event: error\ndata: {json.dumps({'message': error_msg})}\n\n"
 
     return StreamingResponse(

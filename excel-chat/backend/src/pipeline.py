@@ -10,7 +10,8 @@ from typing import Any, Callable, Literal
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 from pydantic_ai import Agent, Tool
-from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from llama_index.core.prompts import PromptTemplate
 
@@ -38,6 +39,12 @@ from tools import (
     get_sheet_dtypes,
     _prepare_retrieve_values_tool,
 )
+
+from observability import observe_agent_run, observe_step, init_observability
+from pydantic_ai.capabilities import Instrumentation
+
+# Initialise Langfuse / Pydantic AI instrumentation before any Agent is built.
+init_observability()
 
 
 # ============================================================================
@@ -213,16 +220,18 @@ PRIMARY_MODEL = os.environ.get("MODEL_ID", "openai/gpt-oss-120b:nitro")
 FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL_ID", "deepseek/deepseek-v4-pro")
 
 
-def build_openrouter_model(model_name: str | None = None) -> OpenAIModel:
-    """Create an OpenAIModel configured for OpenRouter.
+def build_openrouter_model(model_name: str | None = None) -> OpenAIChatModel:
+    """Create an OpenAIChatModel configured for OpenRouter.
 
     If *model_name* is provided, use it; otherwise fall back to the primary
     model from the ``MODEL_ID`` env var.
     """
-    return OpenAIModel(
+    return OpenAIChatModel(
         model_name=model_name or PRIMARY_MODEL,
-        base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-        api_key=os.environ.get("OPENROUTER_API_KEY"),
+        provider=OpenAIProvider(
+            base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            api_key=os.environ.get("OPENROUTER_API_KEY"),
+        ),
     )
 
 
@@ -343,10 +352,11 @@ def build_planner_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Sheet
 
     return Agent(
         model,
-        result_type=QueryPlan,
+        output_type=QueryPlan,
         system_prompt=instructions,
         model_settings={"temperature": 0.1},
-        result_retries=2,
+        retries=2,
+        capabilities=[Instrumentation()],
     )
 
 
@@ -398,7 +408,7 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
     return Agent(
         model,
         deps_type=PipelineDeps,
-        result_type=ExecutionResult,
+        output_type=ExecutionResult,
         system_prompt=system_prompt,
         tools=[
             retrieve_t,
@@ -420,7 +430,8 @@ def build_executor_agent(sheets: dict[str, pd.DataFrame], sheet_metas: list[Shee
             get_sheet_dtypes,
         ],
         model_settings={"temperature": 0.1},
-        result_retries=2,
+        retries=2,
+        capabilities=[Instrumentation()],
     )
 
 
@@ -430,7 +441,7 @@ def build_responder_agent(model_name: str | None = None) -> Agent[None, str]:
 
     return Agent(
         model,
-        result_type=str,
+        output_type=str,
         system_prompt=f"""You are a helpful financial assistant.
 
         Given a user's question and the calculated results, provide a clear, conversational
@@ -440,6 +451,7 @@ def build_responder_agent(model_name: str | None = None) -> Agent[None, str]:
         {GUARDRAIL_SYSTEM_PROMPT}
         """,
         model_settings={"temperature": 0.3},
+        capabilities=[Instrumentation()],
     )
 
 
@@ -507,19 +519,39 @@ async def _run_with_fallback(
     for i, (label, model_name) in enumerate(attempts):
         if i > 0:
             await asyncio.sleep(2 * i)  # brief backoff: 2s, 4s
+        model_label = model_name or PRIMARY_MODEL
         try:
             kw = dict(kwargs)
             if model_name is not None:
                 kw["model_name"] = model_name
             agent = build_agent(*args, **kw)
-            if deps is not None:
-                return await agent.run(prompt, deps=deps)
-            return await agent.run(prompt)
+            with observe_step(
+                name="excel-chat:agent_attempt",
+                input={"stage": label, "model": model_label, "prompt": prompt[:500]},
+                metadata={"stage": label, "model": model_label},
+            ) as attempt_span:
+                try:
+                    if deps is not None:
+                        result = await agent.run(prompt, deps=deps)
+                    else:
+                        result = await agent.run(prompt)
+                    if attempt_span:
+                        attempt_span.set_output(
+                            result.output if hasattr(result, "output") else result
+                        )
+                        attempt_span.record_usage(result.usage, 0)
+                    return result
+                except Exception as exc:
+                    if attempt_span:
+                        attempt_span.record(
+                            decision="retry",
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                    raise
         except Exception as exc:
             if not _is_fallback_worthy_error(exc):
                 raise
             last_exc = exc
-            model_label = model_name or PRIMARY_MODEL
             print(f"⚠️ Attempt {i+1} ({label}, {model_label}) failed: {type(exc).__name__}: {exc}")
             if i < len(attempts) - 1:
                 next_label = attempts[i + 1][0]
@@ -647,12 +679,24 @@ def _prepopulate_retrievals(plan: QueryPlan, deps: PipelineDeps) -> dict[str, An
                 if _looks_like_year(args[1]):
                     field = args[0]
                     years = args[1:]
-                    raw = retrieve_values(ctx, field, years, sheet="")
+                    with observe_step(
+                        name="excel-chat:tool:retrieve_values",
+                        input={"field": field, "years": years, "sheet": ""},
+                    ) as retrieve_span:
+                        raw = retrieve_values(ctx, field, years, sheet="")
+                        if retrieve_span:
+                            retrieve_span.set_output(raw)
                 else:
                     sheet = args[0]
                     field = args[1]
                     years = args[2:]
-                    raw = retrieve_values(ctx, field, years, sheet=sheet)
+                    with observe_step(
+                        name="excel-chat:tool:retrieve_values",
+                        input={"field": field, "years": years, "sheet": sheet},
+                    ) as retrieve_span:
+                        raw = retrieve_values(ctx, field, years, sheet=sheet)
+                        if retrieve_span:
+                            retrieve_span.set_output(raw)
                 # Multi-year returns JSON; single-year returns a plain string
                 if len(years) > 1:
                     try:
@@ -734,215 +778,420 @@ def build_query_pipeline(
     async def run_pipeline(query: str) -> dict:
         # Optimization 6: per-stage timing dict returned alongside the answer.
         timings: dict[str, float] = {}
+        stage_usages: list[Any] = []
 
-        # Step 1: Plan
-        _emit("status", {"message": "Analyzing your question…"})
-        with timed("planner", timings):
-            plan_result = await _run_with_fallback(
-                build_planner_agent, query, sheets, sheet_metas
-            )
-        plan: QueryPlan = plan_result.data
-        print("Plan:", json.dumps(plan.model_dump(), indent=2))
-
-        # Emit classified intent + plan
-        _emit("plan", {
-            "task_type": plan.task_type,
-            "plan": plan.model_dump().get("plan"),
-            "items": plan.items,
-            "description": plan.description,
-        })
-
-        # Step 2: Execute
-        deps = PipelineDeps(
-            sheets=sheets,
-            sheet_metas=sheet_metas,
-            original_query=query,
-            available_fields=all_fields,
-            available_years=all_years,
+        with observe_agent_run(
+            name="excel-chat:query",
             user_id=user_id,
-        )
+            tags=["excel-chat", "query"],
+        ) as trace_span:
+            # Step 1: Plan
+            _emit("status", {"message": "Analyzing your question…"})
+            with timed("planner", timings):
+                with observe_step(
+                    name="excel-chat:step:planner",
+                    input={"query": query[:500]},
+                ) as planner_span:
+                    plan_result = await _run_with_fallback(
+                        build_planner_agent, query, sheets, sheet_metas
+                    )
+                    if planner_span:
+                        planner_span.record_usage(
+                            plan_result.usage, timings.get("planner", 0) * 1000
+                        )
+                        stage_usages.append(plan_result.usage)
+            plan: QueryPlan = plan_result.output
+            print("Plan:", json.dumps(plan.model_dump(), indent=2))
 
-        # ------------------------------------------------------------------
-        # Optimization 2: pre-populate retrieve steps in pure
-        # Python. The executor then only has to handle compute / friendly
-        # response, which collapses the LLM round-trip count.
-        # ------------------------------------------------------------------
-        pre_populated: dict[str, Any] = {}
-        if plan.plan:
-            _emit("status", {"message": "Retrieving data from sheets…"})
-            with timed("pre_populate", timings):
-                pre_populated = _prepopulate_retrievals(plan, deps)
-            if pre_populated:
-                print(f"Pre-populated {len(pre_populated)} values: {pre_populated}")
-                _emit("pre_populated", {"values": pre_populated})
-
-        # ------------------------------------------------------------------
-        # Short-circuit: if every step is a retrieve, we don't
-        # need the executor at all. Build the ExecutionResult directly.
-        # ------------------------------------------------------------------
-        if plan.plan and _plan_is_pure_retrieve(plan):
-            step_results: dict[str, Any] = {}
-            final_answers: list[Any] = []
-            for name, step in plan.plan.items():
-                val = pre_populated.get(name)
-                step_results[name] = val
-                if not str(val).startswith("ERROR"):
-                    final_answers.append(val)
-            # Single value → scalar; multiple → list.
-            final_answer: Any = (
-                final_answers[0] if len(final_answers) == 1 else final_answers
-            )
-            execution = ExecutionResult(
-                step_results=step_results,
-                final_answer=final_answer,
-                explanation=(
-                    f"Retrieved {len(final_answers)} value(s) directly from the "
-                    "DataFrame (no executor LLM call required)."
-                ),
-                friendly_response="",  # filled in by _format_simple_response
-            )
-            _emit("status", {"message": "All values retrieved — preparing answer…"})
-            print("Skipped executor — pure retrieve plan.")
-            try:
-                from result_cache import cache_step_results
-                cache_step_results(user_id, plan, execution)
-            except Exception as e:
-                print(f"⚠️ Post-execution caching failed: {e}")
-            friendly = inject_disclaimer(_format_simple_response(query, plan, execution) or "")
-            if friendly:
-                print(f"Response: {friendly[:100]}...")
-            _emit("friendly", {"response": friendly})
-            total = sum(timings.values())
-            print(f"Pipeline total: {total:.2f}s | {timings}")
-            return {
-                "answer": execution.model_dump(),
-                "plan": plan.model_dump(),
+            # Emit classified intent + plan
+            _emit("plan", {
                 "task_type": plan.task_type,
-                "friendly_response": friendly,
-                "timings": timings,
-            }
+                "plan": plan.model_dump().get("plan"),
+                "items": plan.items,
+                "description": plan.description,
+            })
 
-        # ------------------------------------------------------------------
-        # Short-circuit 2: retrieve_numbers with items but no plan steps.
-        # The planner returned a list of "Field, Year" strings instead of
-        # structured steps. Parse them and retrieve directly — no executor
-        # LLM call needed.
-        # ------------------------------------------------------------------
-        if plan.task_type == "retrieve_numbers" and plan.items and not plan.plan:
-            _emit("status", {"message": "Retrieving data from sheets…"})
-            from types import SimpleNamespace
-            ctx = SimpleNamespace(deps=deps)
-            step_results: dict[str, Any] = {}
-            final_answers: list[Any] = []
+            # Step 2: Execute
+            deps = PipelineDeps(
+                sheets=sheets,
+                sheet_metas=sheet_metas,
+                original_query=query,
+                available_fields=all_fields,
+                available_years=all_years,
+                user_id=user_id,
+            )
 
-            # Parse all items to extract (field, years) pairs.
-            # Planner items can be:
-            #   "Field, Year"                    → 2 parts
-            #   "Category, Subcategory, Year"    → 3 parts (e.g. "Grants, To foreign governments, 2015")
-            #   "Sheet, Field, Year"             → 3 parts
-            # The last part is always the year; the second-to-last is the field name.
-            parsed_items: list[tuple[str, list[str]]] = []
-            for item in plan.items:
-                parts = [p.strip() for p in item.split(",")]
-                if len(parts) < 2:
-                    parsed_items.append((item, []))
-                    continue
-                year = parts[-1]
-                field = parts[-2]
-                # If there are 4+ parts, join middle parts as the field name
-                if len(parts) > 3:
-                    field = ", ".join(parts[1:-1])
-                parsed_items.append((field, [year]))
+            # ------------------------------------------------------------------
+            # Optimization 2: pre-populate retrieve steps in pure
+            # Python. The executor then only has to handle compute / friendly
+            # response, which collapses the LLM round-trip count.
+            # ------------------------------------------------------------------
+            pre_populated: dict[str, Any] = {}
+            if plan.plan:
+                _emit("status", {"message": "Retrieving data from sheets…"})
+                with timed("pre_populate", timings):
+                    with observe_step(
+                        name="excel-chat:step:pre_populate"
+                    ) as prepop_span:
+                        pre_populated = _prepopulate_retrievals(plan, deps)
+                        if prepop_span:
+                            prepop_span.record_usage(
+                                None, timings.get("pre_populate", 0) * 1000
+                            )
+                if pre_populated:
+                    print(f"Pre-populated {len(pre_populated)} values: {pre_populated}")
+                    _emit("pre_populated", {"values": pre_populated})
 
-            # Optimization: if all items share the same field, retrieve once
-            # with all unique years instead of N separate calls
-            item_fields: set[str] = set()
-            for f, _ in parsed_items:
-                if f:
-                    item_fields.add(f)
-            if len(item_fields) == 1 and len(parsed_items) > 1:
-                field = parsed_items[0][0]
-                item_years = sorted({y for _, yrs in parsed_items for y in yrs})
+            # ------------------------------------------------------------------
+            # Short-circuit: if every step is a retrieve, we don't
+            # need the executor at all. Build the ExecutionResult directly.
+            # ------------------------------------------------------------------
+            if plan.plan and _plan_is_pure_retrieve(plan):
+                with observe_step(
+                    name="excel-chat:decision:short_circuit",
+                    input={"path": "pure_retrieve"},
+                ) as decision_span:
+                    step_results: dict[str, Any] = {}
+                    final_answers: list[Any] = []
+                    for name, step in plan.plan.items():
+                        val = pre_populated.get(name)
+                        step_results[name] = val
+                        if not str(val).startswith("ERROR"):
+                            final_answers.append(val)
+                    # Single value → scalar; multiple → list.
+                    final_answer: Any = (
+                        final_answers[0] if len(final_answers) == 1 else final_answers
+                    )
+                    execution = ExecutionResult(
+                        step_results=step_results,
+                        final_answer=final_answer,
+                        explanation=(
+                            f"Retrieved {len(final_answers)} value(s) directly from the "
+                            "DataFrame (no executor LLM call required)."
+                        ),
+                        friendly_response="",  # filled in by _format_simple_response
+                    )
+                    if decision_span:
+                        decision_span.record(
+                            decision="skip_executor", output=execution.step_results
+                        )
+                _emit("status", {"message": "All values retrieved — preparing answer…"})
+                print("Skipped executor — pure retrieve plan.")
                 try:
-                    raw = retrieve_values(ctx, field, item_years, sheet="")
-                    step_results["step1"] = raw
-                    if not str(raw).startswith("ERROR"):
-                        try:
-                            parsed = json.loads(raw)
-                            final_answers.append(parsed)
-                        except (json.JSONDecodeError, TypeError):
-                            final_answers.append(raw)
+                    from result_cache import cache_step_results
+                    cache_step_results(user_id, plan, execution)
                 except Exception as e:
-                    step_results["step1"] = f"ERROR: {type(e).__name__}: {e}"
-            else:
-                # Different fields — retrieve each separately
-                for i, (field, years) in enumerate(parsed_items):
-                    step_name = f"step{i+1}"
-                    if not years:
-                        step_results[step_name] = f"ERROR: cannot parse item '{plan.items[i]}'"
-                        continue
-                    try:
-                        raw = retrieve_values(ctx, field, years, sheet="")
-                        step_results[step_name] = raw
-                        if not str(raw).startswith("ERROR"):
-                            if len(years) > 1:
+                    print(f"⚠️ Post-execution caching failed: {e}")
+                friendly = inject_disclaimer(_format_simple_response(query, plan, execution) or "")
+                if friendly:
+                    print(f"Response: {friendly[:100]}...")
+                _emit("friendly", {"response": friendly})
+                total = sum(timings.values())
+                print(f"Pipeline total: {total:.2f}s | {timings}")
+                if trace_span:
+                    _tokens_in = sum(
+                        getattr(u, "input_tokens", 0) or 0 for u in stage_usages
+                    )
+                    _tokens_out = sum(
+                        getattr(u, "output_tokens", 0) or 0 for u in stage_usages
+                    )
+                    _cost = None
+                    _costs = [
+                        float(c) for u in stage_usages
+                        if (c := getattr(u, "cost", None)) is not None
+                    ]
+                    if _costs:
+                        _cost = sum(_costs)
+                    trace_span.record_totals(
+                        tokens_in=_tokens_in,
+                        tokens_out=_tokens_out,
+                        cost_usd=_cost,
+                        time_ms=total * 1000,
+                    )
+                return {
+                    "answer": execution.model_dump(),
+                    "plan": plan.model_dump(),
+                    "task_type": plan.task_type,
+                    "friendly_response": friendly,
+                    "timings": timings,
+                }
+
+            # ------------------------------------------------------------------
+            # Short-circuit 2: retrieve_numbers with items but no plan steps.
+            # The planner returned a list of "Field, Year" strings instead of
+            # structured steps. Parse them and retrieve directly — no executor
+            # LLM call needed.
+            # ------------------------------------------------------------------
+            if plan.task_type == "retrieve_numbers" and plan.items and not plan.plan:
+                with observe_step(
+                    name="excel-chat:decision:short_circuit",
+                    input={"path": "retrieve_numbers_items"},
+                ) as decision_span:
+                    _emit("status", {"message": "Retrieving data from sheets…"})
+                    from types import SimpleNamespace
+                    ctx = SimpleNamespace(deps=deps)
+                    step_results: dict[str, Any] = {}
+                    final_answers: list[Any] = []
+
+                    # Parse all items to extract (field, years) pairs.
+                    # Planner items can be:
+                    #   "Field, Year"                    → 2 parts
+                    #   "Category, Subcategory, Year"    → 3 parts (e.g. "Grants, To foreign governments, 2015")
+                    #   "Sheet, Field, Year"             → 3 parts
+                    # The last part is always the year; the second-to-last is the field name.
+                    parsed_items: list[tuple[str, list[str]]] = []
+                    for item in plan.items:
+                        parts = [p.strip() for p in item.split(",")]
+                        if len(parts) < 2:
+                            parsed_items.append((item, []))
+                            continue
+                        year = parts[-1]
+                        field = parts[-2]
+                        # If there are 4+ parts, join middle parts as the field name
+                        if len(parts) > 3:
+                            field = ", ".join(parts[1:-1])
+                        parsed_items.append((field, [year]))
+
+                    # Optimization: if all items share the same field, retrieve once
+                    # with all unique years instead of N separate calls
+                    item_fields: set[str] = set()
+                    for f, _ in parsed_items:
+                        if f:
+                            item_fields.add(f)
+                    if len(item_fields) == 1 and len(parsed_items) > 1:
+                        field = parsed_items[0][0]
+                        item_years = sorted({y for _, yrs in parsed_items for y in yrs})
+                        try:
+                            raw = retrieve_values(ctx, field, item_years, sheet="")
+                            step_results["step1"] = raw
+                            if not str(raw).startswith("ERROR"):
                                 try:
                                     parsed = json.loads(raw)
                                     final_answers.append(parsed)
                                 except (json.JSONDecodeError, TypeError):
                                     final_answers.append(raw)
+                        except Exception as e:
+                            step_results["step1"] = f"ERROR: {type(e).__name__}: {e}"
+                    else:
+                        # Different fields — retrieve each separately
+                        for i, (field, years) in enumerate(parsed_items):
+                            step_name = f"step{i+1}"
+                            if not years:
+                                step_results[step_name] = f"ERROR: cannot parse item '{plan.items[i]}'"
+                                continue
+                            try:
+                                raw = retrieve_values(ctx, field, years, sheet="")
+                                step_results[step_name] = raw
+                                if not str(raw).startswith("ERROR"):
+                                    if len(years) > 1:
+                                        try:
+                                            parsed = json.loads(raw)
+                                            final_answers.append(parsed)
+                                        except (json.JSONDecodeError, TypeError):
+                                            final_answers.append(raw)
+                                    else:
+                                        final_answers.append(raw)
+                            except Exception as e:
+                                step_results[step_name] = f"ERROR: {type(e).__name__}: {e}"
+
+                    final_answer: Any = (
+                        final_answers[0] if len(final_answers) == 1 else final_answers
+                    )
+                    execution = ExecutionResult(
+                        step_results=step_results,
+                        final_answer=final_answer,
+                        explanation=(
+                            f"Retrieved {len(final_answers)} value(s) directly from "
+                            "the DataFrame (no executor LLM call required)."
+                        ),
+                        friendly_response="",
+                    )
+                    if decision_span:
+                        decision_span.record(
+                            decision="skip_executor", output=step_results
+                        )
+                _emit("pre_populated", {"values": step_results})
+                _emit("status", {"message": "All values retrieved — preparing answer…"})
+                print(f"Skipped executor — retrieve_numbers with {len(plan.items)} items, no plan steps.")
+
+                # Format friendly response from the retrieved data
+                friendly_text = ""
+                if final_answers:
+                    # Deduplicated case: single dict with multiple years
+                    first = final_answers[0]
+                    if isinstance(first, dict) and len(final_answers) == 1:
+                        field_name = parsed_items[0][0] if parsed_items else "value"
+                        lines = [f"Here are the {field_name} values for each year:"]
+                        for year in sorted(first.keys()):
+                            lines.append(f"- **{year}**: {first[year]}")
+                        friendly_text = "\n".join(lines)
+                    else:
+                        # Multiple items — each is a single-year value or dict
+                        parts = []
+                        for i, ans in enumerate(final_answers):
+                            field_name = parsed_items[i][0] if i < len(parsed_items) else f"item{i+1}"
+                            year = parsed_items[i][1][0] if i < len(parsed_items) and parsed_items[i][1] else ""
+                            # Extract scalar from single-year dict
+                            if isinstance(ans, dict) and len(ans) == 1:
+                                val = list(ans.values())[0]
                             else:
-                                final_answers.append(raw)
-                    except Exception as e:
-                        step_results[step_name] = f"ERROR: {type(e).__name__}: {e}"
+                                val = ans
+                            parts.append(f"**{field_name}** in {year}: {val}")
+                        friendly_text = "\n".join(parts)
 
-            final_answer: Any = (
-                final_answers[0] if len(final_answers) == 1 else final_answers
-            )
-            execution = ExecutionResult(
-                step_results=step_results,
-                final_answer=final_answer,
-                explanation=(
-                    f"Retrieved {len(final_answers)} value(s) directly from "
-                    "the DataFrame (no executor LLM call required)."
-                ),
-                friendly_response="",
-            )
-            _emit("pre_populated", {"values": step_results})
-            _emit("status", {"message": "All values retrieved — preparing answer…"})
-            print(f"Skipped executor — retrieve_numbers with {len(plan.items)} items, no plan steps.")
+                friendly = inject_disclaimer(friendly_text)
+                if friendly:
+                    print(f"Response: {friendly[:100]}...")
+                _emit("friendly", {"response": friendly})
+                total = sum(timings.values())
+                print(f"Pipeline total: {total:.2f}s | {timings}")
+                if trace_span:
+                    _tokens_in = sum(
+                        getattr(u, "input_tokens", 0) or 0 for u in stage_usages
+                    )
+                    _tokens_out = sum(
+                        getattr(u, "output_tokens", 0) or 0 for u in stage_usages
+                    )
+                    _cost = None
+                    _costs = [
+                        float(c) for u in stage_usages
+                        if (c := getattr(u, "cost", None)) is not None
+                    ]
+                    if _costs:
+                        _cost = sum(_costs)
+                    trace_span.record_totals(
+                        tokens_in=_tokens_in,
+                        tokens_out=_tokens_out,
+                        cost_usd=_cost,
+                        time_ms=total * 1000,
+                    )
+                return {
+                    "answer": execution.model_dump(),
+                    "plan": plan.model_dump(),
+                    "task_type": plan.task_type,
+                    "friendly_response": friendly,
+                    "timings": timings,
+                }
 
-            # Format friendly response from the retrieved data
-            friendly_text = ""
-            if final_answers:
-                # Deduplicated case: single dict with multiple years
-                first = final_answers[0]
-                if isinstance(first, dict) and len(final_answers) == 1:
-                    field_name = parsed_items[0][0] if parsed_items else "value"
-                    lines = [f"Here are the {field_name} values for each year:"]
-                    for year in sorted(first.keys()):
-                        lines.append(f"- **{year}**: {first[year]}")
-                    friendly_text = "\n".join(lines)
-                else:
-                    # Multiple items — each is a single-year value or dict
-                    parts = []
-                    for i, ans in enumerate(final_answers):
-                        field_name = parsed_items[i][0] if i < len(parsed_items) else f"item{i+1}"
-                        year = parsed_items[i][1][0] if i < len(parsed_items) and parsed_items[i][1] else ""
-                        # Extract scalar from single-year dict
-                        if isinstance(ans, dict) and len(ans) == 1:
-                            val = list(ans.values())[0]
+            _emit("status", {"message": "Running calculations…"})
+
+            # Build execution prompt from the plan
+            if plan.task_type == "retrieve_numbers" and plan.items:
+                exec_prompt = (
+                    f"Retrieve the following values and return them as the final answer: {plan.items}"
+                )
+            elif plan.plan:
+                retrieve_steps = []
+                named_steps = []
+                compute_desc = ""
+                # Build a step-to-field-name mapping so the executor knows which
+                # field each step refers to (for use in friendly_response).
+                step_field_map: list[str] = []
+                for name, step in plan.plan.items():
+                    if step.action == "retrieve":
+                        # Extract field name from args for context
+                        if _looks_like_year(step.args[1] if len(step.args) > 1 else ""):
+                            field_name = step.args[0] if step.args else ""
                         else:
-                            val = ans
-                        parts.append(f"**{field_name}** in {year}: {val}")
-                    friendly_text = "\n".join(parts)
+                            field_name = step.args[1] if len(step.args) > 1 else ""
+                        step_field_map.append(f"  {name} → field: {field_name}")
+                        # If we already pre-populated this step, tell the executor
+                        # to use the literal value instead of re-fetching.
+                        if name in pre_populated:
+                            retrieve_steps.append(
+                                f"  {name} (field: {field_name}): ALREADY DONE — value is {pre_populated[name]}"
+                            )
+                        else:
+                            retrieve_steps.append(f"  {name} (field: {field_name}): retrieve({step.args})")
+                    elif step.action == "compute":
+                        compute_desc = step.args[0] if step.args else ""
+                    elif step.action in NAMED_OPERATIONS:
+                        named_steps.append(f"  {name}: {step.action}({step.args})")
+                steps_desc = "\n".join(retrieve_steps)
+                named_desc = "\n".join(named_steps)
+                pre_populated_block = _format_pre_populated_for_prompt(pre_populated)
+                parts = []
+                if pre_populated_block:
+                    parts.append(pre_populated_block)
+                if retrieve_steps:
+                    parts.append(f"Retrieve these values:\n{steps_desc}")
+                if named_steps:
+                    parts.append(f"Apply these named operations:\n{named_desc}")
+                if compute_desc:
+                    parts.append(f"Then use execute_python_code to calculate: {compute_desc}")
+                # Include step-to-field mapping so executor can name fields in friendly_response
+                if step_field_map:
+                    parts.append(
+                        "Step-to-field mapping (use these field names in your friendly_response):\n"
+                        + "\n".join(step_field_map)
+                    )
+                parts.append(f"User query: {query}")
+                exec_prompt = "\n\n".join(parts)
+            else:
+                exec_prompt = query
 
-            friendly = inject_disclaimer(friendly_text)
+            with observe_step(
+                name="excel-chat:decision:short_circuit",
+                input={"path": "executor", "task_type": plan.task_type},
+            ) as decision_span:
+                if decision_span:
+                    decision_span.record(decision="run_executor")
+                with timed("executor", timings):
+                    with observe_step(
+                        name="excel-chat:step:executor",
+                        input={"task_type": plan.task_type},
+                    ) as executor_span:
+                        exec_result = await _run_with_fallback(
+                            build_executor_agent, exec_prompt, sheets, sheet_metas, deps=deps
+                        )
+                        if executor_span:
+                            executor_span.record_usage(
+                                exec_result.usage, timings.get("executor", 0) * 1000
+                            )
+                            stage_usages.append(exec_result.usage)
+            execution: ExecutionResult = exec_result.output
+            print("✅ Execution:", json.dumps(execution.model_dump(), indent=2))
+            _emit("execution", {"step_results": execution.step_results, "final_answer": execution.final_answer, "explanation": execution.explanation})
+
+            # Layer 3: Post-execution structured key derivation
+            try:
+                from result_cache import cache_step_results
+                cache_step_results(user_id, plan, execution)
+            except Exception as e:
+                print(f"⚠️ Post-execution caching failed: {e}")
+
+            # Step 3: Use executor's friendly_response (merged responder)
+            friendly = inject_disclaimer(
+                execution.friendly_response or _format_simple_response(query, plan, execution) or ""
+            )
             if friendly:
                 print(f"Response: {friendly[:100]}...")
+            else:
+                print("⚠️ No friendly response generated")
             _emit("friendly", {"response": friendly})
+
             total = sum(timings.values())
             print(f"Pipeline total: {total:.2f}s | {timings}")
+            if trace_span:
+                _tokens_in = sum(
+                    getattr(u, "input_tokens", 0) or 0 for u in stage_usages
+                )
+                _tokens_out = sum(
+                    getattr(u, "output_tokens", 0) or 0 for u in stage_usages
+                )
+                _cost = None
+                _costs = [
+                    float(c) for u in stage_usages
+                    if (c := getattr(u, "cost", None)) is not None
+                ]
+                if _costs:
+                    _cost = sum(_costs)
+                trace_span.record_totals(
+                    tokens_in=_tokens_in,
+                    tokens_out=_tokens_out,
+                    cost_usd=_cost,
+                    time_ms=total * 1000,
+                )
             return {
                 "answer": execution.model_dump(),
                 "plan": plan.model_dump(),
@@ -950,98 +1199,6 @@ def build_query_pipeline(
                 "friendly_response": friendly,
                 "timings": timings,
             }
-
-        _emit("status", {"message": "Running calculations…"})
-
-        # Build execution prompt from the plan
-        if plan.task_type == "retrieve_numbers" and plan.items:
-            exec_prompt = (
-                f"Retrieve the following values and return them as the final answer: {plan.items}"
-            )
-        elif plan.plan:
-            retrieve_steps = []
-            named_steps = []
-            compute_desc = ""
-            # Build a step-to-field-name mapping so the executor knows which
-            # field each step refers to (for use in friendly_response).
-            step_field_map: list[str] = []
-            for name, step in plan.plan.items():
-                if step.action == "retrieve":
-                    # Extract field name from args for context
-                    if _looks_like_year(step.args[1] if len(step.args) > 1 else ""):
-                        field_name = step.args[0] if step.args else ""
-                    else:
-                        field_name = step.args[1] if len(step.args) > 1 else ""
-                    step_field_map.append(f"  {name} → field: {field_name}")
-                    # If we already pre-populated this step, tell the executor
-                    # to use the literal value instead of re-fetching.
-                    if name in pre_populated:
-                        retrieve_steps.append(
-                            f"  {name} (field: {field_name}): ALREADY DONE — value is {pre_populated[name]}"
-                        )
-                    else:
-                        retrieve_steps.append(f"  {name} (field: {field_name}): retrieve({step.args})")
-                elif step.action == "compute":
-                    compute_desc = step.args[0] if step.args else ""
-                elif step.action in NAMED_OPERATIONS:
-                    named_steps.append(f"  {name}: {step.action}({step.args})")
-            steps_desc = "\n".join(retrieve_steps)
-            named_desc = "\n".join(named_steps)
-            pre_populated_block = _format_pre_populated_for_prompt(pre_populated)
-            parts = []
-            if pre_populated_block:
-                parts.append(pre_populated_block)
-            if retrieve_steps:
-                parts.append(f"Retrieve these values:\n{steps_desc}")
-            if named_steps:
-                parts.append(f"Apply these named operations:\n{named_desc}")
-            if compute_desc:
-                parts.append(f"Then use execute_python_code to calculate: {compute_desc}")
-            # Include step-to-field mapping so executor can name fields in friendly_response
-            if step_field_map:
-                parts.append(
-                    "Step-to-field mapping (use these field names in your friendly_response):\n"
-                    + "\n".join(step_field_map)
-                )
-            parts.append(f"User query: {query}")
-            exec_prompt = "\n\n".join(parts)
-        else:
-            exec_prompt = query
-
-        with timed("executor", timings):
-            exec_result = await _run_with_fallback(
-                build_executor_agent, exec_prompt, sheets, sheet_metas, deps=deps
-            )
-        execution: ExecutionResult = exec_result.data
-        print("✅ Execution:", json.dumps(execution.model_dump(), indent=2))
-        _emit("execution", {"step_results": execution.step_results, "final_answer": execution.final_answer, "explanation": execution.explanation})
-
-        # Layer 3: Post-execution structured key derivation
-        try:
-            from result_cache import cache_step_results
-            cache_step_results(user_id, plan, execution)
-        except Exception as e:
-            print(f"⚠️ Post-execution caching failed: {e}")
-
-        # Step 3: Use executor's friendly_response (merged responder)
-        friendly = inject_disclaimer(
-            execution.friendly_response or _format_simple_response(query, plan, execution) or ""
-        )
-        if friendly:
-            print(f"Response: {friendly[:100]}...")
-        else:
-            print("⚠️ No friendly response generated")
-        _emit("friendly", {"response": friendly})
-
-        total = sum(timings.values())
-        print(f"Pipeline total: {total:.2f}s | {timings}")
-        return {
-            "answer": execution.model_dump(),
-            "plan": plan.model_dump(),
-            "task_type": plan.task_type,
-            "friendly_response": friendly,
-            "timings": timings,
-        }
 
     return run_pipeline
 
@@ -1061,7 +1218,7 @@ async def generate_user_friendly_response(
 
     Provide a clear, natural language response."""
     result = await _run_with_fallback(build_responder_agent, prompt)
-    return inject_disclaimer(result.data)
+    return inject_disclaimer(result.output)
 
 
 # ============================================================================

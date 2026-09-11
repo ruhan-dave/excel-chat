@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, UploadFile, HTTPException
+from fastapi import FastAPI, Header, UploadFile, HTTPException, Request
 from excelservices import ExcelService
 # from vectordbservices import VectorDBService  # ChromaDB disabled
 from queryservices import QueryService
@@ -47,8 +47,12 @@ from guardrails import (
     MAX_FILE_SIZE_BYTES,
     MAX_SPREADSHEET_ROWS,
 )
+from observability import observe_agent_run, observe_step, init_observability, flush_observability
 
 load_dotenv()
+
+# Initialise Langfuse observability (must run before any Agent is constructed)
+init_observability()
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +118,7 @@ async def _lifespan(app: FastAPI):
     finally:
         if app.state.scheduler is not None:
             app.state.scheduler.shutdown(wait=False)
+        flush_observability()
 
 
 app = FastAPI(root_path='/api', lifespan=_lifespan)
@@ -132,6 +137,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def langfuse_request_span(request: Request, call_next):
+    """Langfuse trace for every HTTP request."""
+    user_id = request.headers.get("X-User-ID") or "anonymous"
+    with observe_agent_run(
+        name=f"excel-chat:http:{request.method} {request.url.path}",
+        user_id=user_id,
+        tags=["excel-chat", "http"],
+        metadata={"method": request.method, "path": request.url.path},
+    ) as span:
+        try:
+            response = await call_next(request)
+            if span:
+                span.record(output={"status_code": response.status_code})
+            return response
+        except Exception as exc:
+            if span:
+                span.record(error=f"{type(exc).__name__}: {exc}")
+            raise
 
 UPLOAD_FOLDER = './uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -472,6 +497,14 @@ async def query_rag(
     query: str,
     x_user_id: str | None = Header(default=None, alias="X-User-ID"),
 ):
+    user_id = x_user_id or "anonymous"
+    _rag_span_cm = observe_agent_run(
+        name="excel-chat:api:/query",
+        user_id=user_id,
+        tags=["excel-chat", "api"],
+        metadata={"query": query[:500]},
+    )
+    span = _rag_span_cm.__enter__()
     try:
         OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
         if not OPENROUTER_API_KEY:
@@ -480,7 +513,13 @@ async def query_rag(
         user_id = x_user_id or "anonymous"
 
         # --- Guardrail Layers 2-4: Screen query before processing ---
-        query_check = screen_query(query, user_id=user_id)
+        with observe_step(name="excel-chat:decision:guardrail", input={"query": query[:500]}) as grd:
+            query_check = screen_query(query, user_id=user_id)
+            if grd:
+                grd.record(
+                    decision="allow" if query_check.allowed else "reject",
+                    output={"allowed": query_check.allowed, "reason": query_check.reason},
+                )
         if not query_check.allowed:
             print(f"🚫 Query rejected: {query_check.reason}")
             return JSONResponse(content=query_check.reject_dict(), status_code=400)
@@ -498,11 +537,17 @@ async def query_rag(
         # On hit, return the cached response without invoking the LLM pipeline.
         # ------------------------------------------------------------------
         try:
-            with timed("semantic_cache_lookup", timings):
-                query_embedding = embed_query(query)
-                cached_response, similarity = find_similar_cached(
-                    user_id, query_embedding, threshold=0.88, query_text=query
-                )
+            with observe_step(name="excel-chat:decision:semantic_cache", input={"query": query[:500]}) as cache_span:
+                with timed("semantic_cache_lookup", timings):
+                    query_embedding = embed_query(query)
+                    cached_response, similarity = find_similar_cached(
+                        user_id, query_embedding, threshold=0.88, query_text=query
+                    )
+                if cache_span:
+                    cache_span.record(
+                        decision="hit" if cached_response is not None else "miss",
+                        output={"similarity": round(similarity, 4) if similarity else None, "cached": cached_response is not None},
+                    )
             if cached_response is not None:
                 print(
                     f"Semantic cache hit for user={user_id} "
@@ -651,6 +696,8 @@ async def query_rag(
         if "empty model response" in error_msg.lower() or "received empty" in error_msg.lower():
             error_msg = "The AI model could not process this query after multiple attempts. Please try rephrasing your question or try again later."
         return {"error": error_msg}
+    finally:
+        _rag_span_cm.__exit__(None, None, None)
 
 
 # ============================================================================
@@ -686,6 +733,13 @@ async def query_stream(
     event_queue: asyncio.Queue = asyncio.Queue()
 
     async def stream_generator():
+        _stream_span_cm = observe_agent_run(
+            name="excel-chat:api:/query/stream",
+            user_id=user_id,
+            tags=["excel-chat", "api", "stream"],
+            metadata={"query": query[:500]},
+        )
+        span = _stream_span_cm.__enter__()
         try:
             OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
             if not OPENROUTER_API_KEY:
@@ -693,7 +747,13 @@ async def query_stream(
                 return
 
             # --- Guardrail Layers 2-4: Screen query before processing ---
-            query_check = screen_query(query, user_id=user_id)
+            with observe_step(name="excel-chat:decision:guardrail", input={"query": query[:500]}) as grd:
+                query_check = screen_query(query, user_id=user_id)
+                if grd:
+                    grd.record(
+                        decision="allow" if query_check.allowed else "reject",
+                        output={"allowed": query_check.allowed, "reason": query_check.reason},
+                    )
             if not query_check.allowed:
                 print(f"🚫 Query rejected: {query_check.reason}")
                 yield f"event: error\ndata: {json.dumps(query_check.reject_dict())}\n\n"
@@ -703,10 +763,16 @@ async def query_stream(
             is_cached = False
             cached_friendly = None
             try:
-                query_embedding = embed_query(query)
-                cached_response, similarity = find_similar_cached(
-                    user_id, query_embedding, threshold=0.88, query_text=query
-                )
+                with observe_step(name="excel-chat:decision:semantic_cache", input={"query": query[:500]}) as cache_span:
+                    query_embedding = embed_query(query)
+                    cached_response, similarity = find_similar_cached(
+                        user_id, query_embedding, threshold=0.88, query_text=query
+                    )
+                    if cache_span:
+                        cache_span.record(
+                            decision="hit" if cached_response is not None else "miss",
+                            output={"similarity": round(similarity, 4) if similarity else None, "cached": cached_response is not None},
+                        )
                 if cached_response is not None:
                     is_cached = True
                     cached_result = json.loads(cached_response) if isinstance(cached_response, str) else None
@@ -923,6 +989,8 @@ async def query_stream(
             if "empty model response" in error_msg.lower() or "received empty" in error_msg.lower():
                 error_msg = "The AI model could not process this query after multiple attempts. Please try rephrasing your question or try again later."
             yield f"event: error\ndata: {json.dumps({'message': error_msg})}\n\n"
+        finally:
+            _stream_span_cm.__exit__(None, None, None)
 
     return StreamingResponse(
         stream_generator(),

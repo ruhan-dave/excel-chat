@@ -23,7 +23,7 @@
 
 ## 1. System Overview
 
-Excel Analyst is a financial data query application that lets users upload Excel files and ask natural-language questions about their data. The backend uses Pydantic AI agents powered by OpenRouter LLMs to classify queries, retrieve values from pandas DataFrames, perform calculations in a secure sandbox, and generate natural-language responses. The frontend is a React SPA that communicates via REST and Server-Sent Events (SSE).
+Excel-chat is a financial data query application that lets users upload Excel files and ask natural-language questions about their data. The backend uses Pydantic AI agents powered by OpenRouter LLMs to classify queries, retrieve values from pandas DataFrames, perform calculations in a secure sandbox, and generate natural-language responses. The frontend is a React SPA that communicates via REST and Server-Sent Events (SSE).
 
 **Key design principles:**
 - **No vector database** — retrieval is done directly from in-memory pandas DataFrames, not embeddings/ChromaDB (disabled).
@@ -1247,6 +1247,32 @@ All stages print emoji-prefixed log lines:
 - `📝 Response:` — friendly response (truncated)
 - `⏱️  Pipeline total:` — timing summary
 - `⚠️` — warnings (cache failures, S3 errors, etc.)
+
+### Langfuse Observability Layer
+
+**File:** `backend/src/observability.py` (new)
+
+The `timed()` dict remains the client-facing timing source. Langfuse adds a deep-dive debugging layer with full trace trees, token cost tracking, and decision audit trails.
+
+**Integration:** Langfuse v4 OTel-based SDK (`langfuse>=4.0.0,<5`) + Pydantic AI native instrumentation (`Agent.instrument_all()` + `capabilities=[Instrumentation()]`). All traces routed to the **"excel-chat"** Langfuse project via project-scoped API keys (`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` from that project's Settings → API Keys).
+
+**Env vars:** `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` (v4-preferred; `LANGFUSE_HOST` accepted as deprecated fallback), `LANGFUSE_TRACING_ENVIRONMENT` (development/production), `LANGFUSE_DEBUG`.
+
+**Span taxonomy:**
+- `excel-chat:http:*` — FastAPI middleware span for every request (method, path, status, user_id)
+- `excel-chat:api:/query*` — request-level span for query endpoints
+- `excel-chat:query` — pipeline-level span (trace root for query processing)
+- `excel-chat:step:*` — stage spans (planner, pre_populate, executor) with `tokens_in`/`tokens_out`/`cost_usd`/`time_ms`
+- `excel-chat:tool:*` — tool call spans (retrieve_values, execute_python_code) with input/output
+- `excel-chat:decision:*` — decision spans (guardrail, semantic_cache, short_circuit) with `metadata["decision"]`
+- `excel-chat:agent_attempt` — per-fallback-attempt spans with model + error + per-attempt cost
+- OTel GENERATION observations — LLM calls (model, token usage, latency) from pydantic-ai instrumentation
+
+**Decision contract:** every decision span carries `metadata["decision"]` ∈ {allow, reject, hit, miss, skip_executor, run_executor, retry} plus `output` with supporting detail.
+
+**Cost/time contract:** every stage span carries `tokens_in`, `tokens_out`, `total_tokens`, `cost_usd` (USD float or null for unpriced models), and `time_ms`. The trace-level span carries aggregated `total_tokens_in`/`total_tokens_out`/`total_tokens`/`total_cost_usd`/`total_time_ms`.
+
+**Graceful degradation:** when `LANGFUSE_*` keys are missing, all helpers become no-ops — the app runs exactly as it would without observability (no crashes, no network calls, ~zero overhead). Unit tests disable Langfuse via `tests/conftest.py` (autouse fixture strips keys unless `LANGFUSE_ENABLED_IN_TESTS=1`).
 
 ---
 

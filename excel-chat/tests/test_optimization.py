@@ -3,8 +3,9 @@ Tests for the latency optimization features in pipeline.py:
 
 * Opt 6 — ``timed()`` context manager records elapsed seconds.
 * Opt 1 — ``retrieve_values()`` unified tool (single + multi-year).
-* Opt 2 — ``_prepopulate_retrievals`` short-circuits pure-retrieve plans.
-* Opt 1/2 — ``_plan_is_pure_retrieve`` and ``_format_pre_populated_for_prompt``.
+* Single-agent refactor — ``build_query_agent`` constructs with the plan tools.
+* Deterministic short-circuit — ``_try_deterministic_lookup`` (0-LLM path).
+* Plan validation — ``validate_plan_semantics`` (fields / years / step refs).
 * Opt 3 — Default model name is the new ``openai/gpt-oss-120b:nitro``.
 """
 
@@ -77,7 +78,7 @@ def test_timed_propagates_return_value():
 # ---------------------------------------------------------------------------
 
 def test_retrieve_values_signature():
-    from pipeline import retrieve_values
+    from tools import retrieve_values
     sig = inspect.signature(retrieve_values)
     params = list(sig.parameters.keys())
     # ctx is positional, then field, years, sheet
@@ -89,7 +90,7 @@ def test_retrieve_values_signature():
 
 def test_retrieve_values_single_sheet_multi_year_returns_scalar_dict():
     """With a single matching sheet, multi-year retrieve_values returns a year → float dict."""
-    from pipeline import retrieve_values, PipelineDeps
+    from tools import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -110,7 +111,7 @@ def test_retrieve_values_single_sheet_multi_year_returns_scalar_dict():
 
 def test_retrieve_values_cross_sheet_returns_per_sheet_dict():
     """Without a sheet name, multi-year retrieve_values returns year → {sheet: float}."""
-    from pipeline import retrieve_values, PipelineDeps
+    from tools import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -131,7 +132,7 @@ def test_retrieve_values_cross_sheet_returns_per_sheet_dict():
 
 def test_retrieve_values_handles_missing_field():
     """A missing field returns an error message."""
-    from pipeline import retrieve_values, PipelineDeps
+    from tools import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -146,7 +147,7 @@ def test_retrieve_values_handles_missing_field():
 
 
 def test_retrieve_values_empty_years_returns_error():
-    from pipeline import retrieve_values, PipelineDeps
+    from tools import retrieve_values, PipelineDeps
     from types import SimpleNamespace
     import uuid
 
@@ -161,7 +162,7 @@ def test_retrieve_values_empty_years_returns_error():
 
 def test_planstep_action_literal_includes_retrieve():
     """The PlanStep.action Literal must allow 'retrieve' and 'compute'."""
-    from pipeline import PlanStep
+    from models import PlanStep
     from typing import get_args
 
     literal_values = get_args(PlanStep.model_fields["action"].annotation)
@@ -169,19 +170,37 @@ def test_planstep_action_literal_includes_retrieve():
     assert "compute" in literal_values
 
 
-def test_executor_agent_registers_retrieve_values_tool():
-    """The executor agent must expose retrieve_values as a tool."""
-    from pipeline import build_executor_agent
+def test_query_agent_builds_with_plan_tools():
+    """The single query agent must construct and register its tools."""
+    from agent import build_query_agent
 
-    df = pd.DataFrame({"2022": [100.0]}, index=["Revenue"])
-    agent = build_executor_agent({"Sheet1": df}, [])
-    tool_names = set(agent._function_tools.keys())
+    try:
+        agent = build_query_agent([])
+    except TypeError as exc:
+        if "_build_sheet_context" in str(exc):
+            pytest.fail(
+                "Genuine bug in backend/src/agent.py: build_query_agent calls "
+                "_build_sheet_context(sheets, sheet_metas) but the helper signature "
+                "is _build_sheet_context(sheet_metas) — fix the call site to pass "
+                "only sheet_metas."
+            )
+        raise
+    assert agent is not None
+    # pydantic-ai 2.x: agent-direct tools (including @agent.tool nested
+    # functions) live in the agent's function toolset.
+    toolset = getattr(agent, "_function_toolset", None)
+    if toolset is not None:
+        tool_names = set(toolset.tools.keys())
+    else:
+        tool_names = set(agent._function_tools.keys())
     assert "retrieve_values" in tool_names
     assert "execute_python_code" in tool_names
+    assert "write_plan" in tool_names
+    assert "update_step_status" in tool_names
 
 
 # ---------------------------------------------------------------------------
-# Opt 2: pre-populate retrievals
+# Year heuristic (kept from the pre-populate era, still used by the pipeline)
 # ---------------------------------------------------------------------------
 
 def test_looks_like_year_detects_year_strings():
@@ -195,182 +214,177 @@ def test_looks_like_year_detects_year_strings():
     assert _looks_like_year("1800") is False  # outside plausible year range
 
 
-def test_prepopulate_retrieve_step_returns_value():
-    """Cross-sheet retrieve returns 'SheetName: value' format."""
-    from pipeline import (
-        _prepopulate_retrievals, PipelineDeps, QueryPlan, PlanStep,
-    )
-    import uuid
+# ---------------------------------------------------------------------------
+# Deterministic short-circuit: _try_deterministic_lookup (0-LLM path)
+# ---------------------------------------------------------------------------
 
-    df = pd.DataFrame(
-        {"2022": [1500.0, 800.0]}, index=["Revenue", "Expenses"],
+def _make_meta(fields, years, sheet_name="Sheet1"):
+    from sheet_metadata import SheetMeta
+    return SheetMeta(
+        sheet_id="s1", file_id="f1", file_name="report.xlsx",
+        sheet_name=sheet_name, s3_key="s3://bucket/report.xlsx",
+        fields=list(fields), years=list(years),
     )
-    deps = PipelineDeps(
-        sheets={"Sheet1": df}, sheet_metas=[], original_query="q",
-        user_id=f"test_{uuid.uuid4().hex[:8]}",
-    )
-    plan = QueryPlan(
-        task_type="perform_calculations",
-        plan={"step1": PlanStep(action="retrieve", args=["Revenue", "2022"])},
-    )
-    result = _prepopulate_retrievals(plan, deps)
-    # Cross-sheet retrieve with single matching sheet returns "Sheet1: 1500.0"
-    assert result["step1"] == "Sheet1: 1500.0"
 
 
-def test_prepopulate_specific_sheet_returns_scalar():
-    """Specific-sheet retrieve returns just the scalar value as a string."""
-    from pipeline import (
-        _prepopulate_retrievals, PipelineDeps, QueryPlan, PlanStep,
-    )
-    import uuid
+def test_deterministic_lookup_simple_query_returns_field_and_year():
+    from pipeline import _try_deterministic_lookup
 
-    df = pd.DataFrame(
-        {"2022": [1500.0, 800.0]}, index=["Revenue", "Expenses"],
+    metas = [_make_meta(["Revenue", "Expenses"], ["2022", "2023"])]
+    assert _try_deterministic_lookup("What was the revenue in 2023?", metas) == (
+        "Revenue", "2023",
     )
-    deps = PipelineDeps(
-        sheets={"Sheet1": df}, sheet_metas=[], original_query="q",
-        user_id=f"test_{uuid.uuid4().hex[:8]}",
-    )
-    plan = QueryPlan(
-        task_type="perform_calculations",
-        plan={"step1": PlanStep(
-            action="retrieve", args=["Sheet1", "Revenue", "2022"],
-        )},
-    )
-    result = _prepopulate_retrievals(plan, deps)
-    assert result["step1"] == "1500.0"
 
 
-def test_prepopulate_multi_year_retrieve_returns_parsed_dict():
-    from pipeline import (
-        _prepopulate_retrievals, PipelineDeps, QueryPlan, PlanStep,
-    )
-    import uuid
+def test_deterministic_lookup_interest_expense_field():
+    """Field names with multiple words match case-insensitively as substrings."""
+    from pipeline import _try_deterministic_lookup
 
-    df = pd.DataFrame(
-        {"2022": [100.0], "2023": [150.0]},
-        index=["Revenue"],
-    )
-    deps = PipelineDeps(
-        sheets={"Sheet1": df}, sheet_metas=[], original_query="q",
-        user_id=f"test_{uuid.uuid4().hex[:8]}",
-    )
-    plan = QueryPlan(
-        task_type="perform_calculations",
-        plan={"b1": PlanStep(action="retrieve", args=["Revenue", "2022", "2023"])},
-    )
-    result = _prepopulate_retrievals(plan, deps)
-    assert result["b1"] == {"2022": 100.0, "2023": 150.0}
+    metas = [_make_meta(["Interest expense", "Revenue"], ["2022", "2023"])]
+    result = _try_deterministic_lookup("What was the interest expense in 2023?", metas)
+    assert result == ("Interest expense", "2023")
 
 
-def test_prepopulate_specific_sheet_multi_year():
-    """retrieve with [sheet, field, years...] is routed to that sheet."""
-    from pipeline import (
-        _prepopulate_retrievals, PipelineDeps, QueryPlan, PlanStep,
-    )
-    import uuid
+def test_deterministic_lookup_how_much_prefix():
+    from pipeline import _try_deterministic_lookup
 
-    df = pd.DataFrame(
-        {"2022": [100.0], "2023": [150.0]},
-        index=["Revenue"],
-    )
-    deps = PipelineDeps(
-        sheets={"Sheet1": df}, sheet_metas=[], original_query="q",
-        user_id=f"test_{uuid.uuid4().hex[:8]}",
-    )
-    plan = QueryPlan(
-        task_type="perform_calculations",
-        plan={"b1": PlanStep(action="retrieve", args=["Sheet1", "Revenue", "2022", "2023"])},
-    )
-    result = _prepopulate_retrievals(plan, deps)
-    assert result["b1"] == {"2022": 100.0, "2023": 150.0}
+    metas = [_make_meta(["Revenue"], ["2022"])]
+    assert _try_deterministic_lookup("How much was revenue in 2022?", metas) == ("Revenue", "2022")
 
 
-def test_prepopulate_skips_non_retrieve_steps():
-    """Named ops and compute steps are left for the executor."""
-    from pipeline import (
-        _prepopulate_retrievals, PipelineDeps, QueryPlan, PlanStep,
-    )
-    import uuid
+def test_deterministic_lookup_calc_keyword_returns_none():
+    """Queries needing calculation must fall through to the agent."""
+    from pipeline import _try_deterministic_lookup
 
-    deps = PipelineDeps(
-        sheets={}, sheet_metas=[], original_query="q",
-        user_id=f"test_{uuid.uuid4().hex[:8]}",
+    metas = [_make_meta(["Revenue"], ["2022", "2023"])]
+    assert _try_deterministic_lookup("What was the revenue growth in 2023?", metas) is None
+    assert _try_deterministic_lookup("What is the average revenue in 2023?", metas) is None
+
+
+def test_deterministic_lookup_two_years_returns_none():
+    from pipeline import _try_deterministic_lookup
+
+    metas = [_make_meta(["Revenue"], ["2022", "2023"])]
+    assert _try_deterministic_lookup("What was revenue in 2022 and 2023?", metas) is None
+
+
+def test_deterministic_lookup_no_matching_field_returns_none():
+    from pipeline import _try_deterministic_lookup
+
+    metas = [_make_meta(["Revenue"], ["2022"])]
+    assert _try_deterministic_lookup("What was the free cash flow in 2022?", metas) is None
+
+
+def test_deterministic_lookup_multiple_fields_returns_none():
+    """Two distinct catalog fields mentioned → ambiguous → None."""
+    from pipeline import _try_deterministic_lookup
+
+    metas = [_make_meta(["Revenue", "Expenses"], ["2022"])]
+    assert (
+        _try_deterministic_lookup("What was revenue and expenses in 2022?", metas)
+        is None
     )
+
+
+def test_deterministic_lookup_no_year_returns_none():
+    from pipeline import _try_deterministic_lookup
+
+    metas = [_make_meta(["Revenue"], ["2022", "2023"])]
+    assert _try_deterministic_lookup("What was the revenue?", metas) is None
+
+
+# ---------------------------------------------------------------------------
+# Plan validation: validate_plan_semantics
+# ---------------------------------------------------------------------------
+
+def test_validate_plan_semantics_valid_plan_returns_no_errors():
+    from agent import validate_plan_semantics; from models import QueryPlan, PlanStep
+
+    metas = [_make_meta(["Revenue", "Expenses"], ["2022", "2023"])]
     plan = QueryPlan(
         task_type="perform_calculations",
         plan={
-            "step1": PlanStep(action="compute", args=["sum the values"]),
-            "step2": PlanStep(action="add", args=["1", "2"]),
+            "step1": PlanStep(action="retrieve", args=["Revenue", "2022"]),
+            # Sheet-scoped retrieve: ["SheetName", "FieldName", "Year"]
+            "step2": PlanStep(action="retrieve", args=["Sheet1", "Expenses", "2023"]),
+            "step3": PlanStep(action="subtract", args=["step1", "step2"]),
         },
     )
-    result = _prepopulate_retrievals(plan, deps)
-    assert result == {}
+    assert validate_plan_semantics(plan, metas) == []
 
 
-def test_prepopulate_handles_empty_plan():
-    from pipeline import _prepopulate_retrievals, PipelineDeps, QueryPlan
-    import uuid
-    deps = PipelineDeps(
-        sheets={}, sheet_metas=[], original_query="q",
-        user_id=f"test_{uuid.uuid4().hex[:8]}",
+def test_validate_plan_semantics_unknown_field_with_did_you_mean_hint():
+    from agent import validate_plan_semantics; from models import QueryPlan, PlanStep
+
+    metas = [_make_meta(["Revenue", "Expenses"], ["2022"])]
+    plan = QueryPlan(
+        task_type="perform_calculations",
+        plan={"step1": PlanStep(action="retrieve", args=["Revenu", "2022"])},
     )
-    plan = QueryPlan(task_type="give_advice", description="explain revenue")
-    assert _prepopulate_retrievals(plan, deps) == {}
+    errors = validate_plan_semantics(plan, metas)
+    assert len(errors) == 1
+    assert "unknown field" in errors[0]
+    assert "Revenu" in errors[0]
+    # difflib hint suggests the closest catalog field
+    assert "Revenue" in errors[0]
 
 
-def test_plan_is_pure_retrieve():
-    from pipeline import _plan_is_pure_retrieve, QueryPlan, PlanStep
+def test_validate_plan_semantics_unknown_year_lists_valid_years():
+    from agent import validate_plan_semantics; from models import QueryPlan, PlanStep
 
-    pure = QueryPlan(
+    metas = [_make_meta(["Revenue"], ["2022", "2023"])]
+    plan = QueryPlan(
+        task_type="perform_calculations",
+        plan={"step1": PlanStep(action="retrieve", args=["Revenue", "2019"])},
+    )
+    errors = validate_plan_semantics(plan, metas)
+    assert len(errors) == 1
+    assert "unknown year" in errors[0]
+    assert "2019" in errors[0]
+    assert "2022" in errors[0] and "2023" in errors[0]  # valid years listed
+
+
+def test_validate_plan_semantics_forward_reference_rejected():
+    from agent import validate_plan_semantics; from models import QueryPlan, PlanStep
+
+    metas = [_make_meta(["Revenue"], ["2022"])]
+    plan = QueryPlan(
         task_type="perform_calculations",
         plan={
-            "a": PlanStep(action="retrieve", args=["Revenue", "2022"]),
-            "b": PlanStep(action="retrieve", args=["Revenue", "2022", "2023"]),
+            "step1": PlanStep(action="subtract", args=["step2", "100"]),
+            "step2": PlanStep(action="retrieve", args=["Revenue", "2022"]),
         },
     )
-    assert _plan_is_pure_retrieve(pure) is True
+    errors = validate_plan_semantics(plan, metas)
+    assert any("defined later" in e for e in errors)
 
-    mixed = QueryPlan(
+
+def test_validate_plan_semantics_named_op_garbage_arg_rejected():
+    from agent import validate_plan_semantics; from models import QueryPlan, PlanStep
+
+    metas = [_make_meta(["Revenue"], ["2022"])]
+    plan = QueryPlan(
         task_type="perform_calculations",
         plan={
-            "a": PlanStep(action="retrieve", args=["Revenue", "2022"]),
-            "b": PlanStep(action="compute", args=["sum"]),
+            "step1": PlanStep(action="retrieve", args=["Revenue", "2022"]),
+            "step2": PlanStep(action="add", args=["step1", "banana"]),
         },
     )
-    assert _plan_is_pure_retrieve(mixed) is False
-
-    empty = QueryPlan(task_type="give_advice", description="x")
-    assert _plan_is_pure_retrieve(empty) is False
-
-
-def test_format_pre_populated_block_renders_human_readable():
-    from pipeline import _format_pre_populated_for_prompt
-
-    out = _format_pre_populated_for_prompt({
-        "step1": 1500.0,
-        "step2": {"2022": 100.0, "2023": 150.0},
-    })
-    assert "Pre-computed values" in out
-    assert "do NOT call retrieve" in out
-    assert "step1: 1500.0" in out
-    assert "step2:" in out
-
-
-def test_format_pre_populated_block_empty_returns_empty_string():
-    from pipeline import _format_pre_populated_for_prompt
-    assert _format_pre_populated_for_prompt({}) == ""
+    errors = validate_plan_semantics(plan, metas)
+    assert any("banana" in e and "must reference a prior step" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------
 # Opt 3: model name default
 # ---------------------------------------------------------------------------
 
-def test_default_model_is_gpt_oss_120b_nitro():
-    """build_openrouter_model must default to the :nitro tier."""
-    import pipeline
-    assert pipeline.PRIMARY_MODEL == "openai/gpt-oss-120b:nitro"
+def test_default_model_is_deepseek_v4_flash():
+    """build_openrouter_model must default to deepseek/deepseek-v4-flash."""
+    import models
+    # .env (loaded via sheet_metadata import) may override MODEL_ID at import
+    # time, so assert on the source default rather than the runtime value.
+    src = Path(models.__file__).read_text()
+    assert 'os.environ.get("MODEL_ID", "deepseek/deepseek-v4-flash")' in src
 
 
 # ---------------------------------------------------------------------------

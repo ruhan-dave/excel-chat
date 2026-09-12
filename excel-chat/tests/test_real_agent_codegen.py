@@ -27,7 +27,6 @@ os.environ["OPENAI_API_KEY"] = os.environ.get("OPENROUTER_API_KEY", "")
 from excelservices import ExcelService
 from sheet_metadata import SheetMeta
 from pipeline import build_query_pipeline
-from llama_index.core.prompts import PromptTemplate
 
 EXCEL_FILE = Path(__file__).parent.parent / "example_sheets" / "Detailed_Expense_Breakdown.xlsx"
 
@@ -51,8 +50,7 @@ def _build_pipeline():
         years=years,
         row_count=len(cleaned),
     )
-    template = PromptTemplate("Query: {query}\n\nSheet context: {sheet_context}")
-    return build_query_pipeline(None, sheets, [meta], template)
+    return build_query_pipeline(sheets, [meta])
 
 
 @pytest.fixture(scope="module")

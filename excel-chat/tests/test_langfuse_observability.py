@@ -66,7 +66,6 @@ os.environ["OPENAI_API_KEY"] = os.environ.get("OPENROUTER_API_KEY", "")
 from excelservices import ExcelService
 from sheet_metadata import SheetMeta
 from pipeline import build_query_pipeline
-from llama_index.core.prompts import PromptTemplate
 
 # Initialise observability before any Agent is constructed (required by
 # Agent.instrument_all() — must run before build_query_pipeline is used).
@@ -137,10 +136,7 @@ def _build_pipeline(user_id: str = "test-langfuse"):
         years=years,
         row_count=len(cleaned),
     )
-    template = PromptTemplate("Query: {query}\n\nSheet context: {sheet_context}")
-    return build_query_pipeline(
-        None, sheets, [meta], template, user_id=user_id,
-    )
+    return build_query_pipeline(sheets, [meta], user_id=user_id)
 
 
 def _run_query_traced(pipe, query: str, query_id: str, user_id: str):

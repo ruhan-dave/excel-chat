@@ -12,7 +12,7 @@ sys.path.insert(0, str(backend_src))
 
 from sheet_metadata import SheetMeta, init_db, get_cached_response, set_cached_response, get_cache_stats
 from excelservices import ExcelService
-from pipeline import PipelineDeps, retrieve_values
+from tools import PipelineDeps, retrieve_values
 from pydantic_ai import RunContext
 import pandas as pd
 

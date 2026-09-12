@@ -16,30 +16,30 @@
 12. [Deployment & Docker](#12-deployment--docker)
 13. [Timing & Observability](#13-timing--observability)
 14. [Cleanup & Lifecycle](#14-cleanup--lifecycle)
-15. [Planned: Single-Agent Refactor](#15-planned-single-agent-refactor)
+15. [Single-Agent Architecture](#15-single-agent-architecture)
 16. [Resilience, Fallback Patterns & Failure Modes](#16-resilience-fallback-patterns--failure-modes)
 
 ---
 
 ## 1. System Overview
 
-Excel-chat is a financial data query application that lets users upload Excel files and ask natural-language questions about their data. The backend uses Pydantic AI agents powered by OpenRouter LLMs to classify queries, retrieve values from pandas DataFrames, perform calculations in a secure sandbox, and generate natural-language responses. The frontend is a React SPA that communicates via REST and Server-Sent Events (SSE).
+Excel-chat is a financial data query application that lets users upload Excel files and ask natural-language questions about their data. The backend uses a single Pydantic AI agent powered by OpenRouter LLMs that plans and executes each query in one agentic run — retrieving values from pandas DataFrames via tools, performing calculations in a secure sandbox, and synthesizing a natural-language response. The frontend is a React SPA that communicates via REST and Server-Sent Events (SSE).
 
 **Key design principles:**
 - **No vector database** — retrieval is done directly from in-memory pandas DataFrames, not embeddings/ChromaDB (disabled).
 - **Multi-sheet awareness** — sheets with similar schemas are grouped for cross-sheet comparisons.
 - **Layered caching** — semantic cache for full responses, result cache for intermediate retrievals/computations, exact-match LLM cache for auto-descriptions.
-- **Streaming** — SSE pushes intermediate pipeline stages to the frontend so users see progress in real time.
+- **Streaming** — SSE pushes the agent's plan steps and tool calls to the frontend so users see progress in real time.
 
 ### Engineering Rationale
 
-**Why no vector database?** The original architecture used ChromaDB to embed and retrieve financial data points. This added latency (embedding generation + vector search ~200ms) and complexity (a separate service, embedding pipeline, schema sync). Since the data is tabular and structured (field names + years), direct `df.loc[field, year]` lookups in pandas are O(1) and return exact values — no approximate matching needed. Dropping the vector DB reduced query latency by ~2s and eliminated a dependency that was difficult to keep in sync with S3 file changes. The trade-off: no fuzzy field-name matching ("revenue" won't match "Total Revenue"), which is acceptable because the planner LLM handles field-name resolution against the sheet metadata catalog.
+**Why no vector database?** The original architecture used ChromaDB to embed and retrieve financial data points. This added latency (embedding generation + vector search ~200ms) and complexity (a separate service, embedding pipeline, schema sync). Since the data is tabular and structured (field names + years), direct `df.loc[field, year]` lookups in pandas are O(1) and return exact values — no approximate matching needed. Dropping the vector DB reduced query latency by ~2s and eliminated a dependency that was difficult to keep in sync with S3 file changes. The trade-off: no fuzzy field-name matching ("revenue" won't match "Total Revenue"), which is acceptable because the agent LLM handles field-name resolution against the sheet metadata catalog.
 
-**Why multi-sheet awareness?** Financial reports often split data across tabs (Revenue, Expenses, Balance Sheet) with identical schemas. Without schema grouping, the planner would treat each sheet independently and miss cross-sheet comparison opportunities (e.g., "compare revenue across all sheets"). Jaccard similarity at 0.75 threshold was empirically tuned — lower thresholds caused false groupings of unrelated sheets, higher thresholds missed sheets with minor column differences.
+**Why multi-sheet awareness?** Financial reports often split data across tabs (Revenue, Expenses, Balance Sheet) with identical schemas. Without schema grouping, the agent would treat each sheet independently and miss cross-sheet comparison opportunities (e.g., "compare revenue across all sheets"). Jaccard similarity at 0.75 threshold was empirically tuned — lower thresholds caused false groupings of unrelated sheets, higher thresholds missed sheets with minor column differences.
 
-**Why layered caching instead of a single cache?** Each cache layer targets a different reuse pattern. The semantic cache catches paraphrased queries ("2022 revenue" vs "Revenue in 2022") — a full-response cache that avoids the entire pipeline. The result cache catches intermediate computations (the same `df.loc["Revenue", "2022"]` is needed across multiple queries) — a granular cache that avoids re-scanning DataFrames. The exact-match LLM cache catches identical prompts (auto-description generation for the same sheet profile). A single cache layer would either be too coarse (full-response only — misses intermediate reuse) or too fine (intermediate only — misses paraphrased query reuse). The trade-off is cache complexity: 4 cache layers with different invalidation rules, key schemes, and storage backends. This is manageable because all layers share the same Redis/SQLite dual-write infrastructure.
+**Why layered caching instead of a single cache?** Each cache layer targets a different reuse pattern. The semantic cache catches paraphrased queries ("2022 revenue" vs "Revenue in 2022") — a full-response cache that avoids the agent run entirely. The result cache catches intermediate computations (the same `df.loc["Revenue", "2022"]` is needed across multiple queries) — a granular cache that avoids re-scanning DataFrames. The exact-match LLM cache catches identical prompts (auto-description generation for the same sheet profile). A single cache layer would either be too coarse (full-response only — misses intermediate reuse) or too fine (intermediate only — misses paraphrased query reuse). The trade-off is cache complexity: 4 cache layers with different invalidation rules, key schemes, and storage backends. This is manageable because all layers share the same Redis/SQLite dual-write infrastructure.
 
-**Why SSE instead of WebSocket?** SSE is unidirectional (server → client), which matches our use case: the pipeline pushes progress events, the frontend never sends data mid-query. WebSocket would add connection management complexity (ping/pong, reconnection logic) for no benefit. SSE works over standard HTTP, passes through nginx proxies without special config, and is natively supported by the browser's `EventSource` API — no client library needed. The trade-off: SSE is limited to text payloads (we JSON-encode everything) and has a 6-connection-per-domain browser limit (not an issue for a single-user app).
+**Why SSE instead of WebSocket?** SSE is unidirectional (server → client), which matches our use case: the agent run pushes progress events, the frontend never sends data mid-query. WebSocket would add connection management complexity (ping/pong, reconnection logic) for no benefit. SSE works over standard HTTP, passes through nginx proxies without special config, and is natively supported by the browser's `EventSource` API — no client library needed. The trade-off: SSE is limited to text payloads (we JSON-encode everything) and has a 6-connection-per-domain browser limit (not an issue for a single-user app).
 
 ## 2. Component Map
 
@@ -115,7 +115,7 @@ User selects .xlsx file
 
 **Why upload to S3 before parsing?** The file is uploaded to S3 first, then parsed locally. This ensures the file is safely persisted even if parsing fails or the container crashes mid-parse. If parsing fails, the user can retry without re-uploading — the backend can re-download from S3. The trade-off: an extra S3 PUT (~200ms for a 5MB file) before the user gets feedback. This is acceptable because parsing is fast (~1s) and the S3 upload runs in parallel with the local parse in practice.
 
-**Why auto-describe sheets on upload?** Generating LLM descriptions at upload time (not query time) shifts latency from the critical query path to the non-critical upload path. A user uploading a 5-sheet file waits ~5-10s for descriptions, but every subsequent query benefits from richer sheet context in the planner prompt — improving plan accuracy and reducing misretrievals. The exact-match LLM cache ensures re-uploading the same file doesn't regenerate descriptions (same sheet profile = same cache key). The trade-off: upload latency increases and costs an LLM call per sheet (~$0.002/sheet at current pricing).
+**Why auto-describe sheets on upload?** Generating LLM descriptions at upload time (not query time) shifts latency from the critical query path to the non-critical upload path. A user uploading a 5-sheet file waits ~5-10s for descriptions, but every subsequent query benefits from richer sheet context in the agent prompt — improving retrieval accuracy and reducing misretrievals. The exact-match LLM cache ensures re-uploading the same file doesn't regenerate descriptions (same sheet profile = same cache key). The trade-off: upload latency increases and costs an LLM call per sheet (~$0.002/sheet at current pricing).
 
 ### 3.2 Query Flow (Non-Streaming)
 
@@ -129,11 +129,10 @@ User submits query
   → Read Excel files from S3 into memory (BytesIO, no disk I/O)
       → Cache parsed sheets per s3_key within the request
   → Build sheet context string (names, fields, years, descriptions, schema groups)
-  → Format classification template with sheet context + query
   → build_query_pipeline() → run_pipeline(query)
-      → Step 1: Planner agent (LLM call) → QueryPlan
-      → Step 2: Pre-populate retrievals (pure Python, no LLM)
-      → Step 3: Short-circuit if pure retrieve, else Executor agent (LLM call)
+      → Deterministic short-circuit check (pure-retrieval heuristic)
+          → HIT: retrieve in pure Python, format response (0 LLM calls)
+          → MISS: single agent run (1-3 LLM round-trips: retrieve → compute → synthesize)
   → Store result in semantic cache
   → Return {answer, friendly_response, timings, cached: false}
 ```
@@ -144,12 +143,11 @@ User submits query
 User submits query
   → GET /query/stream?query=...  (SSE)
   → Same cache check + sheet loading as above
-  → Pipeline runs with on_event callback
+  → Single agent runs with deps.on_event callback
   → Events pushed to asyncio.Queue, yielded as SSE:
       event: status      → "Analyzing your question…"
-      event: plan        → {task_type, plan, items, description}
-      event: status      → "Retrieving data from sheets…"
-      event: pre_populated → {values: {...}}
+      event: tool_call   → {tool: "retrieve_batch", args: {...}}   (per tool call)
+      event: pre_populated → {values: {...}}                        (after each retrieval)
       event: status      → "Running calculations…"
       event: execution   → {step_results, final_answer, explanation}
       event: friendly    → {response: "..."}
@@ -161,249 +159,409 @@ User submits query
 
 ## 4. Agent Architecture
 
-The pipeline currently uses **two agents** with a deterministic short-circuit path. A third agent (responder) exists but is not used in the main flow.
+> **Design decision (current):** There is **one agent** — it plans (via the `Planning` capability), executes (via tools), observes (tool results return into its context, and it reasons between calls via `Thinking`), and outputs (structured `ExecutionResult` synthesis). The previous planner → executor → responder split is retired. What remains of the old "pipeline" is only a thin orchestration wrapper around the agent run: semantic-cache check → deterministic short-circuit check → agent run → cache write. See [§15](#15-single-agent-architecture) for the refactor rationale and migration plan.
 
-### 4.1 Planner Agent (`build_planner_agent`)
+### 4.1 The Agent (`build_query_agent`)
 
-**Purpose:** Classify the user's query and produce a structured execution plan.
+**Purpose:** One agent handles the full query lifecycle — plan, retrieve, compute, synthesize — in a single agentic run.
 
-**Model:** `openai/gpt-oss-120b:nitro`, temperature 0.1, 3 retries.
+**Model:** Configurable via `MODEL_ID` (currently `deepseek/deepseek-v4-flash`), temperature 0.1, 3 retries.
 
-**Input:** User query string + sheet context (names, fields, years, descriptions, schema groups).
+**Type:** `Agent[PipelineDeps, ExecutionResult]` — dependency-injected sheet access + event callback, structured output.
 
-**Output:** `QueryPlan` (Pydantic model):
 ```python
-class QueryPlan(BaseModel):
-    task_type: Literal["retrieve_numbers", "perform_calculations", "give_advice", "other"]
-    plan: dict[str, PlanStep] | None    # numbered steps for calculations
-    items: list[str] | None             # ["FieldName, Year"] for retrievals
-    description: str | None             # for advice requests
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import Instrumentation, Thinking
+
+agent = Agent(
+    model,
+    deps_type=PipelineDeps,
+    output_type=ExecutionResult,
+    system_prompt=SYSTEM_PROMPT,
+    retries=3,
+    capabilities=[
+        Thinking(effort='low'),       # reasoning between tool calls (reason → act → reason)
+        Instrumentation(),            # Langfuse OTel tracing
+    ],
+)
+
+@agent.tool
+async def write_plan(ctx: RunContext[PipelineDeps], plan: QueryPlan) -> str:
+    """Write the execution plan before acting. Schema-validated (pydantic) and
+    semantically validated (field names/years checked against the sheet catalog)."""
+    ...  # see §4.3 Plan Format Enforcement
+
+@agent.tool
+async def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
+    """Retrieve a single value from a sheet for one year.
+
+    Args:
+        field: Exact row label from the sheet catalog (e.g. "Wages and salaries").
+        year: Fiscal year column header (e.g. "2022").
+        sheet: Optional sheet name; empty = search all sheets.
+    """
+    ...  # df.loc lookup via ctx.deps.sheets; emits SSE event via ctx.deps.on_event
+
+@agent.tool
+async def retrieve_batch(ctx: RunContext[PipelineDeps], field: str, years: list[str], sheet: str = "") -> str:
+    """Retrieve one field across multiple years in a single call. Prefer this over repeated retrieve calls."""
+    ...
+
+@agent.tool
+async def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
+    """Execute Python code in a sandboxed interpreter. Use for calculations on retrieved values."""
+    ...
+
+@agent.tool
+async def update_step_status(ctx: RunContext[PipelineDeps], step_id: str, status: Literal["in_progress", "completed"]) -> str:
+    """Mark a plan step in-progress or completed. Call as you work through the plan."""
+    ...
 ```
 
-**System prompt includes:**
-- All available sheets with their fields, years, and descriptions
-- Schema group annotations (sheets sharing the same schema can be cross-compared)
-- Complete enumeration of step types: `retrieve`, `retrieve_batch`, 21 named math operations, `compute`
-- 10 worked examples covering simple retrieval, YoY growth, CAGR, cross-sheet comparison, batch retrieval, complex compute, and advice
-- Instruction to prefer `retrieve_batch` when 2+ years are needed for the same field
-- Instruction to prefer named operations over `compute` for simple math
+**Tool registration rules (per the pydantic-ai tools doc):**
+- Register with the `@agent.tool` decorator (not plain functions in `tools=[]`) — every tool needs `RunContext[PipelineDeps]` to reach `ctx.deps.sheets` and `ctx.deps.on_event`
+- **Docstrings are the tool descriptions** sent to the model — each tool's docstring must state what it does, when to use it, and prefer `retrieve_batch` over repeated `retrieve` calls
+- Type-hinted args (`field: str, year: str`) become the JSON schema the model uses to call the tool — no manual schema authoring
+- **Pydantic-model args (`plan: QueryPlan`) are schema-enforced** — an invalid plan (unknown action, wrong arg shape) is rejected before the function runs, and pydantic-ai sends the validation error back to the model as a retry prompt. This is the same enforcement the old planner got from `output_type=QueryPlan`, now applied at plan-write time (see §4.3)
+- Tool errors return `"ERROR: ..."` strings as tool results (never raise) so the model can reason about the failure and retry with corrected args
 
-**Key behaviors:**
-- For simple lookups ("What was revenue in 2022?") → returns `task_type: "retrieve_numbers"` with `items: ["Revenue, 2022"]`
-- For calculations ("What's the profit margin?") → returns `task_type: "perform_calculations"` with a multi-step `plan`
-- For advice ("How to reduce costs?") → returns `task_type: "give_advice"` with a `description`
+**Capabilities:**
+- `Instrumentation()` — Langfuse OTel tracing (unchanged)
+- `Thinking(effort='low')` — enables the model's native reasoning between tool calls. The model thinks before each tool call and before synthesizing the final answer (the reason → act → reason → act loop). OpenRouter maps this to `reasoning={'effort': ..., 'enabled': True}`; reasoning text arrives as `ThinkingPart`s in the message stream. Effort `'low'` is the right default: enough structure for multi-step financial calculations without the latency of `'high'`.
+- **Plan enforcement is a tool, not a capability.** The `write_plan` / `update_step_status` tools (§4.3) carry the plan schema (`QueryPlan`/`PlanStep` — the same Pydantic models the old planner validated) plus semantic validation against the sheet catalog. This is deliberately *not* the harness `Planning()` capability: its `write_plan(items: list[str])` accepts free-form strings with no format enforcement. The custom tools give identical UX (plan card, step progress events) with the old pipeline's code-enforcement intact.
 
-### 4.2 Executor Agent (`build_executor_agent`)
+**Dependencies (`PipelineDeps`):** a dataclass passed at run time via `agent.run(..., deps=deps)` and accessed inside tools as `ctx.deps`:
+- `sheets: dict[str, pd.DataFrame]` — parsed DataFrames for lookups
+- `sheet_metas: list[SheetMeta]` — field/year catalog for plan + retrieval validation
+- `plan: QueryPlan | None` — the validated plan written by `write_plan` (read by execution tools and the short-circuit check)
+- `on_event: Callable` — SSE emitter so tools and plan events can stream progress to the frontend
+- `user_id: str` — cache scoping
 
-**Purpose:** Execute the plan from the planner using tools, produce structured results + friendly response.
+This follows the pydantic-ai dependency-injection pattern: tools receive `RunContext[PipelineDeps]` as their first parameter and read shared state from `ctx.deps` — no globals, fully type-checked.
 
-**Model:** `openai/gpt-oss-120b:nitro`, temperature 0.1, 3 retries.
+**System prompt (single, unified):**
+- Sheet catalog: names, fields, years, descriptions, schema groups
+- Tool descriptions with usage examples (prefer `retrieve_batch` for 2+ years of one field)
+- Sandbox capabilities for `execute_python_code`
+- Worked examples covering simple retrieval, YoY growth, CAGR, cross-sheet comparison, and advice
+- Instruction to reason step-by-step: identify needed values → retrieve them → compute → synthesize a `friendly_response` using actual field names
 
-**Input:** Execution prompt built from the plan (includes pre-populated values if available).
+### 4.2 The Reasoning Loop: Think → Plan → Act → Think → … → Synthesize
 
-**Output:** `ExecutionResult` (Pydantic model):
-```python
-class ExecutionResult(BaseModel):
-    step_results: dict[str, Any]     # per-step results
-    final_answer: Any                # scalar or list
-    explanation: str                 # how the answer was derived
-    friendly_response: str           # natural language answer for the user
-```
-
-**Tools available:** `retrieve`, `extract_val`, `retrieve_batch`, `execute_python_code` (see [§5 Tools](#5-tools)).
-
-**System prompt includes:**
-- Sheet names and count
-- Detailed tool descriptions with usage examples
-- Instruction to prefer `retrieve_batch` over multiple `retrieve` calls
-- Sandbox capabilities (math module, builtins, statistics)
-- Instruction to include a `friendly_response` field with formatted numbers
-
-**Key behaviors:**
-- Receives pre-populated values in the prompt (told "ALREADY DONE — value is X") so it doesn't re-call retrieve tools
-- Handles named operations either by computing directly in Python or via `execute_python_code`
-- For `compute` steps: generates Python code, calls `execute_python_code` sandbox
-- Returns structured `ExecutionResult` including the natural-language `friendly_response`
-
-### 4.3 Responder Agent (`build_responder_agent`) — *Not used in main pipeline*
-
-**Purpose:** Generate a friendly natural-language response from calculation results.
-
-**Status:** Bypassed. The executor agent now includes `friendly_response` in its output, making this agent redundant. It remains in the codebase for the legacy `generate_user_friendly_response()` function.
-
-### 4.4 Hand-Off Between Agents
-
-The hand-off is **not a conversation** — it's a **structured data pass**:
+The single agent preserves the full reasoning sequence that the old three-agent pipeline performed, using the `Thinking` capability and the code-enforced plan tools (§4.3):
 
 ```
-Planner agent
-  → produces QueryPlan (Pydantic model, validated)
-  → plan.model_dump() serialized to dict
-
-Pre-population (pure Python, no LLM)
-  → reads plan.plan steps
-  → executes retrieve/retrieve_batch directly against DataFrames
-  → returns dict[step_name → value]
-
-Executor agent
-  → receives execution prompt containing:
-      - pre-populated values (as literal text)
-      - remaining steps (named ops, compute) as instructions
-      - original user query
-  → calls tools as needed for non-pre-populated steps
-  → returns ExecutionResult
+agent.run(query, deps=PipelineDeps(...))
+  │
+  ├─ THINK (ThinkingPart): model reasons about the query —
+  │    "I need social security and social assistance values for 2017-2021,
+  │     then CAGR for each, then compare"
+  │
+  ├─ PLAN (write_plan tool — schema + semantic validated):
+  │    step 1: retrieve_batch("Social security benefits", 2017..2021)   [pending]
+  │    step 2: retrieve_batch("Social assistance benefits", 2017..2021) [pending]
+  │    step 3: execute CAGR calculations                                [pending]
+  │    step 4: Compare growth rates and summarize                       [pending]
+  │    → validated against sheet catalog → plan card via SSE
+  │    (rejected plans return errors → model rewrites before any execution)
+  │
+  ├─ ACT: tool call retrieve_batch(...) → values returned
+  │    → update_step_status(step1, completed); step2 → in_progress
+  │
+  ├─ THINK again: sees retrieved values, reasons about the calculation
+  │    → tool call execute_python_code("cagr = ...")
+  │
+  ├─ ... loop continues, plan state in ctx.deps.plan ...
+  │
+  └─ SYNTHESIZE: all values in context → ExecutionResult
+       (step_results, final_answer, explanation, friendly_response)
 ```
 
-There is no message history shared between agents. Each agent gets a fresh context.
+**Why explicit planning tools instead of implicit tool-call sequencing?** The model's tool calls alone are opaque — the user would see actions without a deconstructed plan. The plan tool makes the plan a first-class artifact: the model decomposes the query into numbered steps (step 1, 2, 3) *before* executing, updates each step's status as it works, and every plan mutation emits a typed event we forward to the SSE stream. This restores the plan visibility the two-agent design provided, without reintroducing the hand-off.
 
-### 4.5 Short-Circuit: Pure Retrieve
+**Why Thinking?** DeepSeek v4 is a reasoning model — `Thinking(effort='low')` enables its native reasoning mode (mapped by pydantic-ai to OpenRouter's `reasoning={'effort': 'low', 'enabled': True}`). The reasoning between tool calls is what replaces the old planner's explicit plan validation: the model works through "which fields, which years, what math" before each action, reducing wrong-field retrievals and sandbox errors.
 
-If every step in the plan is a `retrieve` or `retrieve_batch` (no compute, no named ops), the executor agent is **skipped entirely**:
+### 4.3 Plan Format Enforcement (Code-Enforced Planning)
 
-```
-_prepopulate_retrievals() runs all steps in pure Python
-→ ExecutionResult built directly from pre-populated values
-→ _format_simple_response() generates a deterministic friendly string
-→ No executor LLM call needed
-```
+The old planner enforced plan format with four layers: a `Literal[...]` action enum in `PlanStep`, self-documenting `Field(description=...)` arg schemas, pydantic validation with `retries=2`, and prompt-level constraints ("always use exact field names"). The agentic design **preserves all four** — but moves them from the output validator into a **validated plan tool**, so the plan is schema-checked *and* semantically checked before any step executes.
 
-This reduces simple lookup queries to **1 LLM call** (planner only).
+**Why not the harness `Planning()` capability for this?** Its `write_plan(items: list[str])` accepts free-form strings — the model could write "step 1: get the revenue thing" and the harness would accept it. That's the hallucination surface. Instead, register a custom `write_plan` tool whose **typed signature is the schema**: pydantic validates the tool args exactly as it validated the old `QueryPlan` output, and the tool body adds semantic validation the old design lacked.
 
-**Why short-circuit?** Profiling showed ~40% of user queries are simple lookups ("What was revenue in 2022?"). Without the short-circuit, each would require 2 LLM calls (planner + executor) at ~3-5s each. The short-circuit cuts this to 1 LLM call + ~10ms of Python, reducing latency from ~8s to ~4s for the most common query type. The trade-off: the deterministic `_format_simple_response()` produces less natural-sounding responses than an LLM (e.g., "Revenue in 2022: 32500" vs "The revenue for 2022 was $32,500"). This is an acceptable trade-off for the 50% latency reduction on the highest-frequency query pattern.
-
-**Failure mode:** If the planner returns a malformed plan (missing `plan` field, wrong step types), `_prepopulate_retrievals()` catches per-step exceptions and records them as `"ERROR: ..."` strings. The short-circuit check (`all steps are retrieve/retrieve_batch`) fails safely — the executor agent is invoked as a fallback, receiving the error strings in its prompt. The executor can then attempt to recover by calling tools directly.
-
-### 4.6 Pre-Population Optimization (`_prepopulate_retrievals`)
-
-This function collapses N sequential LLM round-trips into a single Python pass:
-
-1. Iterates over every step in `plan.plan`
-2. For `retrieve` steps: calls `retrieve()` directly with a `SimpleNamespace` mock context
-3. For `retrieve_batch` steps: calls `retrieve_batch()` directly, parses JSON result
-4. For named ops / compute: skips (left for executor)
-5. Returns `dict[step_name → value]`
-
-The executor then receives these values as literals in its prompt, eliminating the need for it to call retrieve tools.
-
-**Why pre-populate?** Without this, the executor would call `retrieve()` as a tool for each step, requiring an LLM round-trip per retrieval (~2-4s each). A 5-step plan with 3 retrievals would take 3 × 3s = 9s just for retrievals. Pre-population does all retrievals in ~10ms of pure Python, then tells the executor "these values are already done." The executor only needs LLM calls for compute steps. The trade-off: the executor prompt gets larger (includes literal values), increasing token cost by ~200-500 tokens per query. At $0.15/1K tokens, this costs ~$0.04-0.08 extra per query — negligible compared to the 6-9s latency saved.
-
-### 4.7 Step Types & Execution Lifecycle
-
-Each step in a `QueryPlan` is a `PlanStep` with an `action` and `args` list. The execution path differs depending on the action type.
-
-#### PlanStep Structure
+**Layer 1 — Schema enforcement (automatic, pydantic):** the tool's args are Pydantic models, so an invalid tool call is rejected before the function ever runs. pydantic-ai sends the validation error back to the model as a retry prompt — the same mechanism the old planner used for `output_type=QueryPlan`, now applied per-tool-call:
 
 ```python
 class PlanStep(BaseModel):
+    """Same shape as the old planner's PlanStep — the contract doesn't change."""
     action: Literal[
-        "retrieve", "retrieve_batch", "compute",
+        "retrieve", "retrieve_batch", "execute_python_code",
         "add", "subtract", "multiply", "divide", "return_percentage",
         "sqrt", "power", "log", "exp", "abs", "negate",
         "max", "min", "average", "median", "stdev",
         "yoy_growth", "cagr", "ratio", "percentage_change", "difference",
-    ]
-    args: list[str]
+    ] = Field(description=(
+        "'retrieve'/'retrieve_batch' fetch values from the DataFrames; "
+        "'execute_python_code' runs sandboxed Python for complex math; "
+        "named operations apply math to prior step results."
+    ))
+    args: list[str] = Field(description=(
+        "For 'retrieve': ['FieldName', 'Year1', ...] or ['SheetName', 'FieldName', 'Year1', ...]. "
+        "For 'retrieve_batch': one field, multiple years. "
+        "For named operations: prior step references (['step1']) or literals (['step1', '100']). "
+        "For 'execute_python_code': the Python code itself."
+    ))
+    description: str = Field(description=(
+        "Short present-tense action for the UI plan card, e.g. 'Retrieving social security benefits 2017-2021'."
+    ))
+
+
+class QueryPlan(BaseModel):
+    """Same shape as the old planner's output — task_type + validated steps."""
+    task_type: Literal["retrieve_numbers", "perform_calculations", "give_advice", "other"]
+    steps: list[PlanStep]
 ```
 
-#### Step Types by Execution Path
+**Layer 2 — Semantic enforcement (tool body, new):** the old design couldn't check this at plan time — a typo'd field name (`"Revenu"`) or invalid year (`"2019x"`) passed schema validation and only failed at execution. The tool body closes that gap using the sheet catalog in `ctx.deps.sheet_metas`:
 
-| Step Type | Who Executes | LLM Call? | Pre-Populated? | Example |
-|-----------|-------------|-----------|----------------|---------|
-| `retrieve` | Pre-population (pure Python) | No | ✅ Yes | `retrieve(["Revenue", "2022"])` → `"32500"` |
-| `retrieve_batch` | Pre-population (pure Python) | No | ✅ Yes | `retrieve_batch(["Revenue", "2019", "2020", "2021"])` → `{"2019": 30000, "2020": 32000, "2021": 35000}` |
-| Named ops (add, subtract, etc.) | Executor agent | Yes (1 call) | ❌ No | `add(["step1", "step2", "step3"])` → sum of 3 prior steps |
-| `compute` | Executor agent → sandbox | Yes (1-2 calls) | ❌ No | `compute(["Calculate CAGR of Revenue from 2019 to 2023"])` → Python code generated + executed |
+```python
+@agent.tool
+async def write_plan(ctx: RunContext[PipelineDeps], plan: QueryPlan) -> str:
+    """Write the execution plan before acting. The plan is validated:
+    actions must be from the allowed set, field names and years must exist
+    in the sheet catalog, and step references must resolve."""
+    errors = validate_plan(plan, ctx.deps.sheet_metas)
+    if errors:
+        # Return errors as the tool result — the model sees exactly what's
+        # wrong and rewrites the plan (same retry UX as the old planner).
+        return "PLAN REJECTED — fix these and call write_plan again:\n" + "\n".join(errors)
 
-#### Execution Lifecycle for a Multi-Step Plan
+    ctx.deps.plan = plan                      # store for execution + UI
+    await ctx.deps.on_event("plan", {         # plan card: numbered steps + descriptions
+        "task_type": plan.task_type,
+        "steps": [{"id": f"step{i+1}", "action": s.action,
+                   "description": s.description} for i, s in enumerate(plan.steps)],
+    })
+    return f"Plan accepted: {len(plan.steps)} steps."
 
-Example: "Compare the growth rates of social security benefits versus social assistance benefits from 2017 to 2021"
 
-**Planner output:**
-```json
-{
-  "task_type": "perform_calculations",
-  "plan": {
-    "step1": {"action": "retrieve_batch", "args": ["Social security benefits", "2017", "2018", "2019", "2020", "2021"]},
-    "step2": {"action": "retrieve_batch", "args": ["Social assistance benefits", "2017", "2018", "2019", "2020", "2021"]},
-    "step3": {"action": "compute", "args": ["Calculate CAGR of Social security benefits from 2017 to 2021 using step1 values"]},
-    "step4": {"action": "compute", "args": ["Calculate CAGR of Social assistance benefits from 2017 to 2021 using step2 values"]},
-    "step5": {"action": "compute", "args": ["Compare step3 and step4, identify which is higher and by how much"]}
-  }
-}
+def validate_plan(plan: QueryPlan, sheet_metas: list[SheetMeta]) -> list[str]:
+    """Semantic checks the old pipeline deferred to execution time."""
+    errors = []
+    valid_fields = {f for m in sheet_metas for f in m.fields}
+    valid_years = {y for m in sheet_metas for y in m.years}
+    step_ids = {f"step{i+1}" for i in range(len(plan.steps))}
+
+    for i, step in enumerate(plan.steps):
+        sid = f"step{i+1}"
+        if step.action in ("retrieve", "retrieve_batch"):
+            # args = [maybe SheetName, FieldName, years...]
+            field = step.args[1] if step.args[0] in {m.sheet_name for m in sheet_metas} else step.args[0]
+            years = step.args[2:] if field != step.args[0] else step.args[1:]
+            if field not in valid_fields:
+                errors.append(f"{sid}: unknown field '{field}'. Valid fields include: {sorted(valid_fields)[:10]}...")
+            bad_years = [y for y in years if y not in valid_years]
+            if bad_years:
+                errors.append(f"{sid}: unknown year(s) {bad_years}. Valid years: {sorted(valid_years)}")
+        elif step.action != "execute_python_code":  # named ops
+            for ref in step.args:
+                if not ref.replace('.', '').isdigit() and ref not in step_ids:
+                    errors.append(f"{sid}: arg '{ref}' does not reference a prior step or a literal number")
+    return errors
 ```
 
-**Execution flow:**
+**Layer 3 — Status tracking (harness `Planning` capability, optional):** pair the validated `write_plan` with the harness's `update_task_status` tool for step progress events (`step_started` / `step_completed`), or implement status updates in a ~10-line custom tool backed by `ctx.deps.plan`. The harness capability is still useful here — but only *after* `write_plan` has enforced the format; the harness's free-form `write_plan` is replaced by the validated one above.
+
+**Layer 4 — Prompt constraints (unchanged):** the unified system prompt keeps the old planner's rules verbatim — exact field names/years from the catalog, prefer `retrieve_batch` for multi-year, prefer named ops over `execute_python_code` for simple math, plus the worked examples. The schema `Field(description=...)` texts carry the same arg-shape guidance the old `PlanStep` had.
+
+**Execution reads the validated plan.** Because `write_plan` stored the validated `QueryPlan` in `ctx.deps.plan`, the agent's subsequent tool calls follow its own plan — and the short-circuit pre-check can also inspect `plan.steps` (all retrieve/retrieve_batch → pure-Python path) exactly like the old `plan.task_type` check. The plan is no longer a serialized hand-off artifact; it's a validated, shared in-run artifact.
+
+**Failure path:** a rejected plan costs one extra LLM round-trip (model sees the specific errors, rewrites). This is strictly better than the old design, where a semantically invalid plan passed validation silently and produced `"ERROR: ..."` strings at execution time — the model now learns about bad fields/years *before* doing retrieval work.
+
+**Note on dependencies:** with plan format enforced by a custom tool, `pydantic-ai-harness` is optional — its `Planning` capability adds the cache-friendly plan reminder and typed events, but the validated `write_plan` + `update_step_status` custom tools (~60 lines total) deliver the same UX with zero new packages. `Thinking(effort='low')` remains core pydantic-ai.
+
+### 4.4 Deterministic Short-Circuit (Preserved)
+
+Simple lookups still bypass the LLM entirely:
 
 ```
-Step 1: Pre-population (pure Python, ~0.003s)
-  ├─ step1: retrieve_batch("Social security benefits", ["2017",...,"2021"])
-  │    → df.loc["Social security benefits", ["2017",...,"2021"]]
-  │    → {"2017": 344.98, "2018": 420.12, "2019": 580.45, "2020": 720.89, "2021": 852.20}
-  │
-  ├─ step2: retrieve_batch("Social assistance benefits", ["2017",...,"2021"])
-  │    → df.loc["Social assistance benefits", ["2017",...,"2021"]]
-  │    → {"2017": 4099.55, "2018": 4800.12, "2019": 5600.89, "2020": 6900.45, "2021": 8792.95}
-  │
-  └─ step3, step4, step5: SKIPPED (compute steps — left for executor)
-
-Step 2: Executor agent receives prompt with pre-populated values
-  ├─ Prompt includes:
-  │    "step1 (field: Social security benefits): ALREADY DONE — value is {"2017": 344.98, ...}"
-  │    "step2 (field: Social assistance benefits): ALREADY DONE — value is {"2017": 4099.55, ...}"
-  │    "Then use execute_python_code to calculate: Calculate CAGR..."
-  │    "Step-to-field mapping (use these field names in friendly_response):
-  │       step1 → field: Social security benefits
-  │       step2 → field: Social assistance benefits"
-  │
-  ├─ Executor LLM call #1: Generate Python code for step3 (CAGR calc)
-  │    → execute_python_code("start = 344.98; end = 852.20; years = 4; cagr = ((end/start)**(1/years)-1)*100; return cagr")
-  │    → sandbox executes → "25.37"
-  │
-  ├─ Executor LLM call #2: Generate Python code for step4 (CAGR calc)
-  │    → execute_python_code("start = 4099.55; end = 8792.95; years = 4; cagr = ((end/start)**(1/years)-1)*100; return cagr")
-  │    → sandbox executes → "21.02"
-  │
-  └─ Executor LLM call #3: Generate step5 + friendly_response
-       → step_results: {"step1": {...}, "step2": {...}, "step3": 25.37, "step4": 21.02, "step5": "Social security benefits grew faster"}
-       → friendly_response: "The CAGR for Social security benefits from 2017 to 2021 is about 25.4%, while..."
+Query arrives
+  → fast-path heuristic (regex/LLM-free classifier): is this a pure retrieval?
+      → YES: run retrieve/retrieve_batch directly in pure Python
+             → _format_simple_response() builds the answer deterministically
+             → 0 LLM calls, ~10ms
+      → NO: run the agent (1-3 LLM round-trips)
 ```
 
-#### How Events Map to Execution Stages
+This preserves the latency win for the ~40% of queries that are simple lookups ("What was revenue in 2022?") without needing a planner call to decide.
 
-Each pipeline stage emits an SSE event so the frontend can show real-time progress:
+### 4.5 Streaming & Progress Events
 
-| Pipeline Stage | SSE Event | Data | What the Frontend Shows |
-|---------------|-----------|------|----------------------|
-| Pipeline starts | `status` | `{"message": "Analyzing your question…"}` | Spinner with "Analyzing your question…" |
-| Planner completes | `plan` | `{"task_type": "perform_calculations", "plan": {...}}` | Plan card with step-by-step breakdown; "Classified Intent" + "Execution Plan" checkmarks |
-| Pre-population starts | `status` | `{"message": "Retrieving data from sheets…"}` | Spinner updates to "Retrieving data…" |
-| Pre-population completes | `pre_populated` | `{"values": {"step1": {...}, "step2": {...}}}` | "Data Retrieved" checkmark; values shown in step tracker |
-| Executor starts | `status` | `{"message": "Running calculations…"}` | Spinner updates to "Running calculations…" |
-| Executor completes | `execution` | `{"step_results": {...}, "final_answer": ..., "explanation": "..."}` | "Calculations Complete" checkmark; step results displayed |
-| Friendly response ready | `friendly` | `{"response": "The CAGR for Social security benefits…"}` | Answer card with formatted response |
-| Pipeline done | `done` | `{"timings": {...}, "total": 8.01}` | "Complete" checkmark with total time |
+The user sees a **deconstructed plan** (step 1, 2, 3 …) with a short description of each action, driven by two event sources:
 
-**Short-circuit path (pure retrieve):** If all steps are `retrieve`/`retrieve_batch`, the executor is skipped. Events are:
-`status` → `plan` → `status` → `pre_populated` → `status` → `friendly` → `done`
+1. **Plan events** — the `write_plan` tool (§4.3) emits a `plan` event once the model's plan passes schema + semantic validation, and `update_step_status` emits `step_started`/`step_completed` events as the model works. Both forward through `ctx.deps.on_event` → SSE. Each step carries its `description` (short action label, e.g. "Retrieving social security benefits") — exactly the short description shown in the UI. Crucially, the plan card only ever shows *validated* plans — a malformed or hallucinated plan is rejected before any event fires.
+2. **Tool-call events** — emitted from inside the tools via `ctx.deps.on_event`, showing the concrete action each step performed.
 
-**Cache hit path:** If the semantic cache hits, no pipeline runs. Events are:
-`cached` → (stream closes)
+| Agent activity | SSE Event | What the Frontend Shows |
+|---------------|-----------|------------------------|
+| Run starts | `status` | "Analyzing your question…" |
+| Model writes plan (`write_plan`) | `plan` | **Plan card: step 1, 2, 3 with short action descriptions** |
+| Step marked in-progress (`update_task_status`) | `step_started` | Step 1 highlighted "in progress — Retrieving data…" |
+| `retrieve`/`retrieve_batch` tool call | `tool_call` | Step checkmark + retrieved values |
+| `execute_python_code` tool call | `tool_call` | Step checkmark + code/result |
+| Step marked completed | `step_completed` | Checkmark on that step |
+| Final structured output | `friendly` | Answer card with `friendly_response` |
+| Run completes | `done` | Timings + total |
 
-#### Step-to-Field Mapping
+The user experience matches the old plan card, but the plan is now **live**: steps appear as the model writes them, progress updates as the model marks them, and the descriptions come from the model's own `active_form` labels ("Retrieving social security benefits…") rather than a static plan dump.
 
-The executor prompt includes a step-to-field-name mapping so the executor can use actual field names in its `friendly_response`:
+**Plan visibility vs. Langfuse detail:** the SSE stream shows the user-facing view — numbered steps with short descriptions. The Langfuse observability layer carries the deep detail: full trace tree with per-GENERATION token usage/cost/latency, tool inputs/outputs, thinking summaries, and decision metadata. The UI answers "what is it doing?"; Langfuse answers "why, at what cost, and how long did each part take?".
 
+**Event wiring:** subscribe to plan events on the agent and bridge them into the existing SSE queue:
+
+```python
+# Events are emitted directly from the validated plan tools (§4.3) —
+# no capability event subscription needed:
+
+@agent.tool
+async def write_plan(ctx: RunContext[PipelineDeps], plan: QueryPlan) -> str:
+    ...  # validation → on_event("plan", {...}) → SSE plan card
+
+@agent.tool
+async def update_step_status(ctx: RunContext[PipelineDeps], step_id: str, status: str) -> str:
+    ...  # on_event("step_started"/"step_completed", {...}) → SSE step progress
 ```
-Step-to-field mapping (use these field names in your friendly_response):
-  step1 → field: Social security benefits
-  step2 → field: Social assistance benefits
+
+Tool-call events are emitted from within the tool functions themselves (via `ctx.deps.on_event`), so each plan step's execution is visible the moment its tool runs.
+
+### 4.6 Multi-Turn Threads (Enabled by Single Agent)
+
+Because there is one agent, conversation continuity uses pydantic-ai's native message history: persist `result.new_messages()` per thread, pass it back via `agent.run(..., message_history=...)` for follow-up questions ("and in 2023?"). The previous two-agent design made this impractical — each agent had a fresh context and no shared conversation state. Note: when `message_history` is provided, pydantic-ai skips regenerating the system prompt, so the sheet-context system prompt must be reinjected (either include it as the first message or use the `ReinjectSystemPrompt` capability).
+
+### 4.7 Conversation Recall & Memory
+
+The codebase already persists everything needed for recall — thread messages (`save_message` / `get_thread_messages` with a `cached` flag), thread listings (`get_threads`), and per-user semantic cache embeddings (`find_similar_cached`). What's missing is **agent access**: today this data is only reachable via REST endpoints, so the agent can neither tell the user what they asked before nor point them to a past thread. Two tiers of recall, both exposed as agent tools:
+
+#### Basic: recall the user's own questions + cache provenance
+
+**Tools registered on the agent:**
+
+```python
+@agent.tool
+async def get_recent_questions(ctx: RunContext[PipelineDeps], limit: int = 10) -> str:
+    """List the user's recent questions across threads, newest first.
+
+    Use when the user asks "what did I ask before?" or references an earlier answer.
+    Returns thread_id, question, timestamp, and whether the answer was served from cache.
+    """
+    rows = get_recent_user_questions(ctx.deps.user_id, limit=limit)   # new SQL helper over messages table
+    return json.dumps(rows)
+
+@agent.tool
+async def get_thread_history(ctx: RunContext[PipelineDeps], thread_id: str) -> str:
+    """Read the full Q&A history of one thread (questions + answers)."""
+    return json.dumps(get_thread_messages(thread_id))
 ```
 
-This is built by iterating over the plan steps and extracting the field name from each `retrieve`/`retrieve_batch` step's args:
-- `retrieve`: field is `args[0]` (or `args[1]` if `args[0]` is a sheet name)
-- `retrieve_batch`: field is `args[0]` (cross-sheet) or `args[1]` (sheet-scoped)
+**Cache-hit provenance:** when the semantic cache hits, the orchestration wrapper already knows (`is_cached=True`, similarity score). Pass this into the run so the agent can be transparent:
 
-Without this mapping, the executor would only see bare step numbers and produce generic responses like "the first series grew at 25.4%" instead of "Social security benefits grew at a CAGR of 25.4%".
+```python
+deps = PipelineDeps(..., cache_hit={"similarity": 0.93, "original_query": "..."})
+```
+
+The system prompt instructs the agent: *when the prompt notes the answer came from the semantic cache, say so — "You asked this earlier; here's the same answer."* This is the "agent decides it has used data from a previous conversation" case — no new infrastructure, just surfacing the existing cache-hit metadata in the prompt and letting the model communicate it.
+
+**Harness equivalent (`Memory` capability):** a persistent Markdown notebook the model can read/write/search across runs — useful if we later want the agent to remember *facts* (e.g. "user prefers YoY growth over absolute values"), not just past questions:
+
+```python
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import SqliteMemoryStore
+
+agent = Agent(
+    model,
+    deps_type=PipelineDeps,
+    capabilities=[
+        Memory(
+            SqliteMemoryStore(database='agent-memory.db'),
+            namespace=lambda ctx: ctx.deps.user_id,   # per-user isolation; resolver hidden from the model
+            max_tokens=2_000,                          # bounded injection into each request
+        ),
+        # ... Thinking, Planning, Instrumentation
+    ],
+)
+```
+
+The namespace resolver runs per run from `ctx.deps.user_id` — the model cannot address another user's memory. Stores: `InMemoryStore`, `FileStore`, `SqliteMemoryStore` (fits our existing SQLite pattern), `PostgresMemoryStore`.
+
+#### Advanced: cross-thread similar-question search
+
+**Goal:** the agent identifies which past thread(s) asked something similar and guides the user there ("You asked something similar in 'Q3 Budget Review' — want me to open it or re-run it against the current sheets?").
+
+**Implementation (existing infra, new tool):** the semantic cache already embeds every query per user (`find_similar_cached` does cosine similarity over stored embeddings). Add a read-only tool that reuses this index but returns *provenance* instead of the cached answer:
+
+```python
+@agent.tool
+async def search_past_questions(ctx: RunContext[PipelineDeps], query: str, limit: int = 5) -> str:
+    """Search the user's past questions across all threads by semantic similarity.
+
+    Use when the user references a previous question ("that thing I asked about grants")
+    or when deciding whether the current question repeats earlier work.
+    Returns: [{thread_id, thread_title, query, asked_at, similarity, was_cached}]
+    """
+    embedding = embed_query(query)
+    matches = find_similar_queries_across_threads(ctx.deps.user_id, embedding, limit=limit)
+    return json.dumps(matches)   # [{thread_id, thread_title, query, answer_preview, similarity}]
+```
+
+This reuses the same embedding + cosine-similarity machinery as the semantic cache but queries the `messages`/`llm_cache` tables for (query, thread_id, similarity) tuples rather than returning the answer — a new SQL helper in `sheet_metadata.py` (~20 lines), no new storage.
+
+**Harness alternative (`ConversationSearch`):** the harness ships a `search_conversation_history` tool that BM25-ranks persisted run history. It pairs with `StepPersistence` on a shared store:
+
+```python
+from pydantic_ai_harness import ConversationSearch, StepPersistence
+from pydantic_ai_harness.conversation_search import SnapshotHistorySource
+from pydantic_ai_harness.step_persistence import SqliteStepStore
+
+store = SqliteStepStore(database='sessions.db')
+agent = Agent(
+    model,
+    capabilities=[
+        StepPersistence(store=store),
+        ConversationSearch(SnapshotHistorySource(store), scope='conversation'),
+        # ...
+    ],
+)
+
+async def ask(question: str, conversation_id: str) -> str:
+    result = await agent.run(question, conversation_id=conversation_id)
+    return result.output
+```
+
+- Ranking is BM25 (pure Python, no new dependencies); rare terms and exact matches score higher
+- `scope='conversation'` restricts the corpus to runs sharing the run's `conversation_id` — pass an authenticated, tenant-scoped value (`conversation_id=f"{user_id}:{thread_id}"`) so users can never reach each other's history
+- pydantic-ai resolves `conversation_id` in order: explicit argument → most recent id on `message_history` → fresh UUID7 — so threading `message_history` through follow-up runs keeps them searchable as one conversation
+- Results carry provenance (`run: ... | conversation: ...`) so the agent can cite which thread a detail came from
+
+**Choosing between the two:** the harness `ConversationSearch` is BM25 over persisted *message text* — good for exact-term recall ("what did I say about CAGR?"). Our semantic-cache-backed `search_past_questions` is embedding-based — catches paraphrases ("how fast did grants grow?" ≈ "what was the growth rate of grants?"). They compose: ship the SQLite-backed custom tools first (no new dependency, reuses existing tables), add `Memory`/`ConversationSearch` from the harness when cross-run persistence and compaction recovery become relevant.
+
+#### What the agent does with recall
+
+| Situation | Agent behavior |
+|-----------|---------------|
+| Semantic cache hit on the current query | Prompt notes `cache_hit: {similarity}` → agent says "I answered this earlier — here it is again" instead of silently re-serving |
+| User asks "what did I ask before?" | Agent calls `get_recent_questions` → lists past questions with thread titles |
+| User references "that grants question" | Agent calls `search_past_questions("grants")` → finds the thread → offers to open it or re-run against current sheets |
+| Follow-up in the same thread | `message_history` replay (§4.6) — no search needed |
+
+### 4.8 What Happens to the Old Agents
+
+| Component | Disposition |
+|-----------|-------------|
+| `build_planner_agent` + `QueryPlan` | Deleted — planning is now explicit via the `Planning` capability (the model writes its own plan with `write_plan`) |
+| `build_executor_agent` | Merged into the single agent (same tools, same output type) |
+| `build_responder_agent` | Deleted — already bypassed; synthesis is the agent's final response |
+| `_prepopulate_retrievals` | Deleted — the agent calls `retrieve_batch` directly (1 tool call ≈ pre-population's single Python pass) |
+| Short-circuit path | Kept — now keyed on a lightweight query classifier, not the plan |
+| `_run_with_fallback` | Kept — wraps the single agent run with 3-attempt retry + model fallback |
+| Plan visibility | **Restored** — the `Planning` capability emits plan events that drive the SSE plan card (step 1, 2, 3 with short descriptions) |
 
 ---
 
@@ -488,7 +646,7 @@ The sandbox uses **pydantic-monty** (`Monty` class) to execute LLM-generated Pyt
 
 ### 6.2 Code Processing Pipeline
 
-When the executor agent calls `execute_python_code(code)`, the following steps occur:
+When the agent calls `execute_python_code(code)`, the following steps occur:
 
 ```
 LLM generates code string
@@ -583,7 +741,7 @@ For each computed value from `ctx.deps.computed_values`:
 
 **Why AST-based sandboxing over `exec()` with restricted globals?** `exec()` with a custom `__builtins__` dict is the common Python sandboxing approach, but it's vulnerable to escape attacks (e.g., accessing `object.__subclasses__()` to reach `os.system`). pydantic-monty parses code into an AST and evaluates only safe node types — there's no path to `__import__` or attribute access on dangerous objects. The trade-off: not all valid Python is supported (no `class` definitions, no `async/await`, no decorators), which occasionally causes the LLM's generated code to fail. The `type_check=False` flag mitigates this by accepting a wider range of code. For a financial calculation sandbox, the restricted syntax is sufficient — the LLM generates arithmetic, loops, and function calls, not class hierarchies.
 
-**Failure mode — sandbox crash:** The entire sandbox execution is wrapped in a try/except. On any error (syntax error, runtime error, type error), the function returns an error string (`"ERROR: TypeError: ..."`) rather than crashing the server. The executor agent receives this as the tool result and can decide how to handle it — typically it retries with corrected code or reports the error in its `friendly_response`. The `finally` block always restores `sys.stdout`, preventing a sandbox crash from corrupting the server's logging output. Known gap: no timeout on sandbox execution — an infinite loop in LLM-generated code would hang the request indefinitely (planned mitigation: `asyncio.wait_for(m.run_async(...), timeout=10)`).
+**Failure mode — sandbox crash:** The entire sandbox execution is wrapped in a try/except. On any error (syntax error, runtime error, type error), the function returns an error string (`"ERROR: TypeError: ..."`) rather than crashing the server. The agent receives this as the tool result and can decide how to handle it — typically it retries with corrected code or reports the error in its `friendly_response`. The `finally` block always restores `sys.stdout`, preventing a sandbox crash from corrupting the server's logging output. Known gap: no timeout on sandbox execution — an infinite loop in LLM-generated code would hang the request indefinitely (planned mitigation: `asyncio.wait_for(m.run_async(...), timeout=10)`).
 
 ```python
 try:
@@ -598,7 +756,7 @@ If an exception occurs, it's caught and returned as:
 return f"Error executing code: {type(e).__name__}: {e}"
 ```
 
-This means the executor agent receives an error string as the tool result and can decide how to handle it (retry with different code, report the error to the user, etc.).
+This means the agent receives an error string as the tool result and can decide how to handle it (retry with different code, report the error to the user, etc.).
 
 **stdout restoration:** The `sys.stdout` redirect is in a `finally` block, so even if the sandbox crashes, stdout is always restored to the original value. Without this, a sandbox crash would leave the server's stdout pointing at a `StringIO` buffer, breaking all subsequent logging.
 
@@ -622,7 +780,7 @@ produce different cache keys despite computing the same result. This is a known 
 
 ### 6.7 Typical Code Generated by the Executor
 
-The executor agent generates Python code based on the computation step description and pre-populated values. Examples:
+The agent generates Python code based on the computation needed and the values it has already retrieved. Examples:
 
 **Simple arithmetic:**
 ```python
@@ -854,7 +1012,7 @@ User submits query
   ├─ WRITE: Result cache (Layer 3 — post-execution)
   │    cache_step_results(user_id, plan, execution)
   │    Stores each step's result under a canonical structured key
-  │    Called after executor agent completes
+  │    Called after the agent run completes
   │
   ├─ WRITE: Semantic cache store
   │    set_cached_response(model, query, response, user_id, embedding)
@@ -866,11 +1024,11 @@ User submits query
        Called for each file whose sheets were loaded
 ```
 
-**Key insight:** SQLite is accessed at the *edges* of the pipeline (before and after the LLM agents run), not *during* agent reasoning. The planner and executor agents never query SQLite directly — they operate on pandas DataFrames and pre-populated values. The only connection between SQLite and the agents is:
+**Key insight:** SQLite is accessed at the *edges* of the pipeline (before and after the agent runs), not *during* agent reasoning. The agent never queries SQLite directly — it operates on pandas DataFrames via tools. The only connection between SQLite and the agent is:
 
-1. **Before agents run:** `get_all_sheets()` populates the planner's system prompt with available fields/years
-2. **During tool calls:** `result_cache_get/set` transparently caches retrieve and sandbox results (agents don't know this is happening)
-3. **After agents complete:** `cache_step_results()` stores structured results for future queries
+1. **Before the agent runs:** `get_all_sheets()` populates the agent's system prompt with available fields/years
+2. **During tool calls:** `result_cache_get/set` transparently caches retrieve and sandbox results (the agent doesn't know this is happening)
+3. **After the agent completes:** `cache_step_results()` stores structured results for future queries
 
 ### 9.3 Tables & Schema
 
@@ -908,7 +1066,7 @@ User submits query
 | `created_at` | TEXT | Creation timestamp |
 | `user_id` | TEXT | Owner |
 
-**Purpose:** This is the **schema catalog**. It tells the planner agent what fields and years are available without loading the Excel file. The planner's system prompt is built from this data:
+**Purpose:** This is the **schema catalog**. It tells the agent what fields and years are available without loading the Excel file. The agent's system prompt is built from this data:
 
 ```
 Available sheets:
@@ -919,7 +1077,7 @@ Available sheets:
     Schema group: group_0
 ```
 
-This means the planner can make intelligent decisions about which steps to plan *without* the DataFrame being loaded yet. The DataFrame is only loaded after the plan is created, during pre-population or executor tool calls.
+This means the agent can make intelligent decisions about which values to retrieve *without* the DataFrame being loaded yet. The DataFrame is only loaded when a retrieve tool actually executes.
 
 **How `fields_json` and `years_json` are populated:** During upload, `ExcelService.load_sheet_metadata_from_file()` reads the Excel file with `pandas.read_excel(sheet_name=None)`, cleans each sheet (detects year row, sets index), then extracts `df.index.tolist()` (fields) and `df.columns.tolist()` (years). These are JSON-serialized and stored.
 
@@ -1011,7 +1169,7 @@ All migrations are idempotent — safe to run on both fresh and existing databas
 **`FileMeta`** (dataclass):
 - `file_id`, `file_name`, `s3_key`, `sheet_count`, `created_at`, `last_accessed`
 
-These dataclasses are populated from SQLite rows via `_row_to_sheetmeta()` and `_row_to_filemeta()` helpers. They are passed throughout the pipeline — the planner agent receives them to build its system prompt, and the executor agent receives them via `PipelineDeps`.
+These dataclasses are populated from SQLite rows via `_row_to_sheetmeta()` and `_row_to_filemeta()` helpers. They are passed throughout the pipeline — the agent receives them to build its system prompt and via `PipelineDeps` for tool access.
 
 ### 9.6 SQLite in the Application Ecosystem
 
@@ -1041,7 +1199,8 @@ These dataclasses are populated from SQLite rows via `_row_to_sheetmeta()` and `
 │  │  1. get_all_sheets(user_id) → SQLite READ                 │   │
 │  │  2. read_excel_from_s3(s3_key) → S3 READ → pandas         │   │
 │  │  3. build_query_pipeline(sheets, sheet_metas)             │   │
-│  │  4. Pipeline runs (planner → pre-populate → executor)     │   │
+│  │  4. Single agent runs (tool loop: retrieve → compute →     │   │
+│  │     synthesize)                                             │   │
 │  │     - Tools transparently use result_cache (SQLite R/W)   │   │
 │  │  5. set_cached_response() → SQLite WRITE (semantic cache) │   │
 │  │  6. touch_file_access() → SQLite WRITE (access tracking)  │   │
@@ -1115,9 +1274,12 @@ Each CRUD function opens a connection, executes its query, commits, and closes. 
 | Event | Data | When |
 |-------|------|------|
 | `status` | `{"message": "..."}` | At each pipeline stage transition |
-| `plan` | `{"task_type": "...", "plan": {...}, "items": [...], "description": "..."}` | After planner agent completes |
-| `pre_populated` | `{"values": {...}}` | After pre-population runs |
-| `execution` | `{"step_results": {...}, "final_answer": ..., "explanation": "..."}` | After executor agent completes |
+| `plan` | `{"task_type": "perform_calculations", "steps": [{"id": "step1", "action": "retrieve_batch", "description": "Retrieving social security benefits 2017-2021"}, ...]}` | Model's `write_plan` call **after validation passes** — the deconstructed step list shown in the plan card |
+| `step_started` | `{"step_id": "step2", "active_form": "Calculating CAGR…"}` | Model marks a step in-progress (`update_step_status` tool) |
+| `tool_call` | `{"tool": "retrieve_batch", "args": {...}}` | Agent invokes a tool |
+| `tool_result` | `{"tool": "...", "result": ...}` | After each tool executes |
+| `step_completed` | `{"step_id": "1"}` | Model marks a step completed |
+| `execution` | `{"step_results": {...}, "final_answer": ..., "explanation": "..."}` | When the agent returns its structured output |
 | `friendly` | `{"response": "..."}` | When friendly response is generated |
 | `done` | `{"timings": {...}, "total": ...}` | Pipeline complete |
 | `cached` | `{"answer": ..., "friendly_response": ..., "similarity": ...}` | Semantic cache hit |
@@ -1130,18 +1292,19 @@ Each CRUD function opens a connection, executes its query, commits, and closes. 
 **Implementation:** Uses `EventSource` API to consume SSE.
 
 **UI rendering:**
-1. **Plan card** — displays task type + step-by-step plan (action + args) as soon as the `plan` event arrives
-2. **Progress tracker** — checkmarked steps as they complete:
-   - "Classified Intent" → "Execution Plan" → "Data Retrieved" → "Calculations Complete" → "Complete"
+1. **Plan card** — numbered steps with short action descriptions, rendered as soon as the `plan` event arrives (only validated plans emit it); each step shows its `active_form` label while running
+2. **Progress tracker** — steps check off live as the model marks them completed (`step_started` / `step_completed`), with tool I/O attached (`tool_call`/`tool_result`)
 3. **Answer card** — final LLM response (blue-highlighted card)
 4. **Calculation Results** — step results with values
 5. **Status indicator** — inline spinner with current status message (replaces old full-screen blur)
 
 **Event handling:**
 - `status` → updates status message
-- `plan` → sets plan data, adds "Classified Intent" and "Execution Plan" steps
-- `pre_populated` → adds "Data Retrieved" step
-- `execution` → adds "Calculations Complete" step, sets answer data
+- `plan` → renders the deconstructed plan card (step 1, 2, 3 + short descriptions)
+- `step_started` → marks the step active (shows its `active_form` label)
+- `tool_call`/`tool_result` → attaches tool arguments/results to the active step
+- `step_completed` → checkmark on that step
+- `execution` → sets answer data
 - `friendly` → sets friendly response
 - `cached` → sets answer + response, adds "Cache Hit" step
 - `done` → adds "Complete" step with total time, closes EventSource
@@ -1227,23 +1390,21 @@ def timed(stage: str, timings: dict[str, float]):
 |-------|-------|-----------------|
 | `semantic_cache_lookup` | `main.py` | Embedding + similarity search |
 | `s3_load` | `main.py` | S3 read + Excel parse for all sheets |
-| `planner` | `pipeline.py` | Planner agent LLM call |
-| `pre_populate` | `pipeline.py` | Pure Python retrieval pass |
-| `executor` | `pipeline.py` | Executor agent LLM call |
+| `agent_run` | `pipeline.py` | Single agent run (all LLM round-trips: tool calls + synthesis) |
+| `short_circuit` | `pipeline.py` | Pure-Python retrieval path (0 LLM calls) |
 | `cache_write` | `main.py` | Semantic cache store |
 | `pipeline` | `main.py` | Total pipeline time (wraps all above) |
 
 Timings are returned in the API response and surfaced in SSE `done` events. Total is printed to stdout.
 
-**Why track per-stage timings?** Without granular timing, a slow query (8s total) is opaque — is it the LLM, S3, or cache? Per-stage timings pinpoint the bottleneck: if `planner` takes 5s, it's an LLM latency issue (switch model or reduce prompt size); if `s3_load` takes 3s, it's a storage issue (cache more aggressively or move to a warmer tier); if `semantic_cache_lookup` takes 2s, the embedding model is slow (consider a smaller model or cache embeddings). The timings are surfaced to the frontend via the `done` SSE event, so users see the breakdown too — building trust through transparency. The trade-off: `time.perf_counter()` calls add ~1μs each, negligible against the seconds-scale stages being measured.
+**Why track per-stage timings?** Without granular timing, a slow query (8s total) is opaque — is it the LLM, S3, or cache? Per-stage timings pinpoint the bottleneck: if the agent run takes 5s, it's an LLM latency issue (switch model or reduce prompt size); if `s3_load` takes 3s, it's a storage issue (cache more aggressively or move to a warmer tier); if `semantic_cache_lookup` takes 2s, the embedding model is slow (consider a smaller model or cache embeddings). The timings are surfaced to the frontend via the `done` SSE event, so users see the breakdown too — building trust through transparency. The trade-off: `time.perf_counter()` calls add ~1μs each, negligible against the seconds-scale stages being measured.
 
 ### Logging
 
 All stages print emoji-prefixed log lines:
-- `📋 Plan:` — planner output (JSON)
-- `⚡ Pre-populated N values:` — pre-population results
-- `⚡ Skipped executor` — pure retrieve short-circuit
-- `✅ Execution:` — executor output (JSON)
+- `⚡ Skipped agent` — pure retrieve short-circuit
+- `🔧 Tool call:` — each tool invocation (retrieve / retrieve_batch / execute_python_code)
+- `✅ Execution:` — agent output (JSON)
 - `📝 Response:` — friendly response (truncated)
 - `⏱️  Pipeline total:` — timing summary
 - `⚠️` — warnings (cache failures, S3 errors, etc.)
@@ -1262,17 +1423,33 @@ The `timed()` dict remains the client-facing timing source. Langfuse adds a deep
 - `excel-chat:http:*` — FastAPI middleware span for every request (method, path, status, user_id)
 - `excel-chat:api:/query*` — request-level span for query endpoints
 - `excel-chat:query` — pipeline-level span (trace root for query processing)
-- `excel-chat:step:*` — stage spans (planner, pre_populate, executor) with `tokens_in`/`tokens_out`/`cost_usd`/`time_ms`
+- `excel-chat:agent_run` — the single agent run span with `tokens_in`/`tokens_out`/`cost_usd`/`time_ms`
 - `excel-chat:tool:*` — tool call spans (retrieve_values, execute_python_code) with input/output
 - `excel-chat:decision:*` — decision spans (guardrail, semantic_cache, short_circuit) with `metadata["decision"]`
 - `excel-chat:agent_attempt` — per-fallback-attempt spans with model + error + per-attempt cost
-- OTel GENERATION observations — LLM calls (model, token usage, latency) from pydantic-ai instrumentation
+- OTel GENERATION observations — LLM calls (model, token usage, latency) from pydantic-ai instrumentation; one GENERATION per tool-loop round-trip
 
-**Decision contract:** every decision span carries `metadata["decision"]` ∈ {allow, reject, hit, miss, skip_executor, run_executor, retry} plus `output` with supporting detail.
+**Decision contract:** every decision span carries `metadata["decision"]` ∈ {allow, reject, hit, miss, skip_agent, run_agent, retry} plus `output` with supporting detail.
 
 **Cost/time contract:** every stage span carries `tokens_in`, `tokens_out`, `total_tokens`, `cost_usd` (USD float or null for unpriced models), and `time_ms`. The trace-level span carries aggregated `total_tokens_in`/`total_tokens_out`/`total_tokens`/`total_cost_usd`/`total_time_ms`.
 
 **Graceful degradation:** when `LANGFUSE_*` keys are missing, all helpers become no-ops — the app runs exactly as it would without observability (no crashes, no network calls, ~zero overhead). Unit tests disable Langfuse via `tests/conftest.py` (autouse fixture strips keys unless `LANGFUSE_ENABLED_IN_TESTS=1`).
+
+**Impact of the single-agent refactor on observability: minimal, by design.** The observability layer wraps *runs and tools*, not agent identities — so the refactor changes almost nothing:
+
+| Unchanged (contract preserved) | Changed |
+|-------------------------------|---------|
+| `excel-chat:http:*` middleware spans (all endpoints) | `excel-chat:step:planner` + `excel-chat:step:executor` spans collapse into one `excel-chat:agent_run` span (there is one run now, not two stages) |
+| `excel-chat:api:/query*` request spans | `_prepopulate_retrievals` explicit tool spans are deleted *with the function* — pydantic-ai's OTel instrumentation now covers every `retrieve`/`retrieve_batch` call automatically |
+| `excel-chat:query` trace-level span + per-query totals (`total_tokens`, `total_cost_usd`, `total_time_ms`) | Span *nesting depth* under `excel-chat:query` is shallower (agent_run instead of planner → pre_populate → executor) |
+| `excel-chat:tool:*` spans with input/output | |
+| `excel-chat:decision:*` spans (guardrail, semantic_cache, short_circuit) with `metadata["decision"]` | |
+| `excel-chat:agent_attempt` fallback spans with per-attempt cost | |
+| OTel GENERATION observations (model, tokens, latency, cost via registered model pricing) | |
+| `record_usage` / `record_totals` cost+time contract | |
+| Graceful degradation + conftest key-stripping | |
+
+The `Planning` and `Thinking` capabilities are additive to observability, not disruptive: pydantic-ai's OTel instrumentation already emits spans for every model round-trip and tool call regardless of which capabilities are active, so plan writes, step-status updates, and thinking appear in the existing trace tree automatically. Optionally, plan-step transitions can be recorded as `observe_step(name="excel-chat:decision:plan_update", ...)` metadata (step id, status) — a natural extension of the existing decision-span contract, not a new mechanism.
 
 ---
 
@@ -1303,49 +1480,136 @@ Files with no `last_accessed` value are treated as fresh (just uploaded).
 
 ---
 
-## 15. Planned: Single-Agent Refactor
+## 15. Single-Agent Architecture
 
-### Current State
+**Decision: adopted.** The planner/executor/responder split is retired. Planning and execution were never separate workflows — they are steps of one reasoning process, and the response is simply synthesis of the tool results. One agent does all three.
 
-Two agents (planner + executor) with a deterministic short-circuit for pure retrievals. The planner classifies intent and produces a structured plan; the executor executes the plan using tools and generates a friendly response.
+### Why Collapse to One Agent
 
-### Motivation
+- **Planning and execution are the same activity.** The planner's "plan" was just a prediction of which tools the executor would call. With a single agent, the model plans by acting: each tool call is a plan step, and the model sees retrieval results in context immediately instead of through a serialized hand-off prompt.
+- **The hand-off was pure overhead.** Serializing `QueryPlan` → prompt reconstruction → pre-population → executor prompt existed only to bridge two agents that shared no context. A single agent keeps retrieved values in its message history natively (pydantic-ai appends tool results to the conversation automatically — no hand-off code).
+- **Synthesis is not a workflow.** The responder agent was already bypassed (the executor emits `friendly_response`). With one agent, the final structured output includes the friendly response — no third call, ever.
+- **One prompt to maintain.** Adding a tool previously meant updating two system prompts + the hand-off builder. Now it's one tool registration and one prompt.
+- **Message history comes free.** Threads/follow-ups ("and in 2023?") pass `result.all_messages()` back via `message_history=` — impossible to do cleanly when two agents each hold half the context.
 
-- **Code simplicity** — the two-agent split adds significant complexity (two system prompts, two result types, pre-population logic, short-circuit logic, hand-off prompt construction)
-- **Marginal latency savings** — the current pre-population optimization already collapses retrievals into pure Python; the executor only handles compute + friendly response (1 LLM call). A single agent would do the same in 1-2 LLM calls depending on tool usage.
+### Design (pydantic-ai grounding)
 
-### Proposed Design
+**One `Agent[PipelineDeps, ExecutionResult]`** with all tools registered and the reasoning loop made explicit:
 
-**Single agent** with all tools (`retrieve`, `retrieve_batch`, `execute_python_code`) and a comprehensive system prompt that handles both planning and execution:
+```python
+@dataclass
+class PipelineDeps:
+    sheets: dict[str, pd.DataFrame]
+    sheet_metas: list[SheetMeta]
+    on_event: Callable[[str, dict], None] | None = None   # SSE emitter
+    user_id: str = "anonymous"
 
-1. **Simple retrieval queries** — agent calls `retrieve` or `retrieve_batch` directly, formats answer from the returned values. 1-2 LLM calls (tool call + response generation).
-2. **Multi-step calculations** — agent calls retrieve tools, then `execute_python_code` for calculations, then formats the response. 2-3 LLM calls.
-3. **Deterministic short-circuit preserved** — if the query is a simple retrieval (detected via regex/heuristics), skip the agent entirely and call `retrieve` in pure Python. Preserves the 1-call path for simple queries.
+query_agent = Agent(
+    model,                          # MODEL_ID via build_openrouter_model()
+    deps_type=PipelineDeps,         # deps injected at run time, accessed as ctx.deps in tools
+    output_type=ExecutionResult,    # structured synthesis: step_results + final_answer + friendly_response
+    system_prompt=QUERY_SYSTEM_PROMPT,
+    retries=3,
+    capabilities=[
+        Thinking(effort='low'),       # reasoning between tool calls (deepseek reasoning → OpenRouter reasoning param)
+        # Plan enforcement via custom write_plan/update_step_status tools (§4.3) — no harness capability
+        Instrumentation(),            # Langfuse OTel (unchanged)
+    ],
+)
+
+@query_agent.tool
+async def retrieve(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
+    """Retrieve a single value..."""   # docstring = tool description sent to the model
+    ...
+
+@query_agent.tool
+async def retrieve_batch(ctx: RunContext[PipelineDeps], field: str, years: list[str], sheet: str = "") -> str:
+    """Retrieve one field across multiple years in a single call. Prefer this over repeated retrieve calls."""
+    ...
+
+@query_agent.tool
+async def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
+    """Execute Python in a sandbox for calculations..."""
+    ...
+```
+
+Key pydantic-ai mechanics this relies on (per the official docs):
+
+| Mechanism | Role in the single agent |
+|-----------|--------------------------|
+| **Function tools** (`@agent.tool`) | `retrieve` / `retrieve_batch` / `execute_python_code` registered with `RunContext[PipelineDeps]`; docstrings are the tool descriptions sent to the model; type-hinted args become the call schema |
+| **Dependencies** (`deps_type=PipelineDeps`) | Tools read DataFrames from `ctx.deps.sheets` and emit SSE progress via `ctx.deps.on_event` — no globals, type-checked |
+| **Thinking capability** (`Thinking(effort='low')`) | Enables the model's native reasoning between tool calls — the reason → act → reason → act sequence. Reasoning text arrives as `ThinkingPart`s (available for UI display and Langfuse spans). OpenRouter translation: `reasoning={'effort': 'low', 'enabled': True}` |
+| **Code-enforced plan tools** (`write_plan(plan: QueryPlan)` / `update_step_status`) | The model writes an explicit numbered plan before acting; the tool's Pydantic schema (`Literal` action enum, typed args) + semantic validation (field/year existence, step-reference resolution) reject malformed plans before execution. Plan events are forwarded to SSE so users see the deconstructed step 1, 2, 3 with short action descriptions. No new dependency |
+| **Structured output** (`output_type=ExecutionResult`) | The final synthesis is schema-validated; `friendly_response` is a required field, so the "responder" role is just the last field of the one output |
+| **Agent graph loop** | pydantic-ai runs the think → tool-call → think → tool-call loop internally; no manual step sequencing code |
+| **Message history** (`result.all_messages()`) | Persisted per thread for follow-up questions; `ReinjectSystemPrompt` capability re-injects the sheet-context system prompt when history is replayed |
+| **`run_stream()` / `event_stream_handler`** | Streaming path: stream the final text and emit tool-call + plan events as they happen |
+
+**Note:** the validated plan tools are the primary design (not a fallback) — they enforce the plan format the way the old pipeline did. The harness `Planning()` capability remains an optional add-on for its cache-friendly plan reminder, but its free-form `write_plan(items: list[str])` does not enforce format, so it would need wrapping in a validator anyway.
+
+### Execution Paths
+
+1. **Pure retrieval** (short-circuit, ~40% of queries): deterministic pre-check classifies the query as a simple lookup → call `retrieve`/`retrieve_batch` directly in pure Python → `_format_simple_response()` → **0 LLM calls**. Unchanged from today.
+2. **Calculation queries**: one agent run — the model calls `retrieve_batch` (values land in context), then `execute_python_code` for math, then returns `ExecutionResult` with the synthesized `friendly_response`. 2-4 LLM round-trips within a single `agent.run()`.
+3. **Advice queries**: no tools needed — the model answers directly from sheet context. 1 LLM call.
 
 ### Streaming with Single Agent
 
-Events would be emitted from within the tool functions themselves:
-- `retrieve` emits "Data Retrieved" event
-- `execute_python_code` emits "Calculations Complete" event
-- Agent's final response emits "Friendly Response" event
+Events are emitted from inside the tools and the Planning capability:
+- `plan` — from the validated `write_plan` tool (emitted only after schema + semantic validation pass): numbered steps with short action descriptions → the plan card, same as before the refactor
+- `step_started` / `step_completed` — from `update_step_status` as the model marks steps in-progress/completed
+- `retrieve` / `retrieve_batch` tool calls → "Data Retrieved" event with values
+- `execute_python_code` → "Calculations Complete" event with code + result
+- Final structured output → "Friendly Response" event
 
-This requires tools to have access to the `on_event` callback (via `PipelineDeps` or context).
+The user sees the deconstructed plan (step 1, 2, 3 with short descriptions) *and* live progress as each step executes — plan visibility is preserved, not lost.
+
+### Observability Changes (Langfuse)
+
+Span taxonomy simplifies:
+- `excel-chat:agent_attempt` — one per fallback attempt of the single agent (unchanged pattern)
+- `excel-chat:tool:*` — now emitted by pydantic-ai's OTel instrumentation for every tool call (retrieve, execute_python_code) with input/output — the explicit `_prepopulate_retrievals` spans are deleted along with the function
+- `excel-chat:decision:short_circuit` — kept, keyed on the deterministic pre-check
+- `excel-chat:step:planner` / `excel-chat:step:executor` spans collapse into a single `excel-chat:agent_run` span carrying the whole run's usage/cost/time
+- Per-query totals (`total_tokens`, `total_cost_usd`, `total_time_ms`) unchanged — now aggregate the single agent's usage
+
+### Migration Checklist
+
+| Change | File | Notes |
+|--------|------|-------|
+| Keep `QueryPlan`/`PlanStep` Pydantic models | `pipeline.py` | Reused as the `write_plan` tool's arg schema — plan format enforcement moves from output validator to tool validator |
+| Add `build_query_agent()` (single agent, all tools, unified prompt) | `pipeline.py` | Merge planner + executor system prompts; keep worked examples; register tools with `@query_agent.tool` + `RunContext[PipelineDeps]` |
+| Add `Thinking(effort='low')` + `Instrumentation()` capabilities | `pipeline.py` | Thinking = reasoning between tool calls; plan enforcement lives in the `write_plan` tool (§4.3), not a capability |
+| Extend `PipelineDeps` with `on_event` | `pipeline.py` | Tools and plan-event handlers emit SSE events via `ctx.deps.on_event` |
+| Add `write_plan` (schema + semantic validation) + `update_step_status` tools emitting SSE events | `pipeline.py` | Restores the plan card (step 1, 2, 3 + short descriptions) with code-enforced plan format |
+| Delete `build_planner_agent`, `build_executor_agent`, `build_responder_agent`, `QueryPlan`/`PlanStep` models, `_prepopulate_retrievals`, `_format_execution_prompt` | `pipeline.py` | ~400 lines removed |
+| Keep short-circuit; re-key on a regex/heuristic classifier instead of `plan.task_type` | `pipeline.py` | Preserves 0-LLM path for simple lookups |
+| Keep `_run_with_fallback` wrapping the single agent run | `pipeline.py` | 3-attempt retry + model fallback unchanged |
+| Add `plan`/`step_started`/`step_completed` events alongside `tool_call` events | `main.py`, frontend `promptinput.tsx` | Plan card restored + live step progress |
+| Add recall tools: `get_recent_questions`, `get_thread_history`, `search_past_questions` | `pipeline.py` + `sheet_metadata.py` | Reuses existing `messages` table + semantic-cache embeddings (§4.7); no new dependency |
+| Surface cache-hit provenance to the agent | `main.py`, `pipeline.py` | On semantic-cache hit, include `{similarity, original_query}` in the prompt so the agent can say "answered this earlier" |
+| Update span names: `excel-chat:step:planner`/`executor` → `excel-chat:agent_run` | `pipeline.py` | Langfuse trace tree: http → api → agent_run → tool calls → generation |
+| Update tests: `test_query_pipeline.py`, `test_real_agent_codegen.py`, `test_langfuse_observability.py` | `tests/` | Plan-card assertions kept (plan events still emitted); add tool-call assertions |
 
 ### Trade-offs
 
-| Aspect | 2 Agents (current) | 1 Agent (proposed) |
-|--------|-------------------|-------------------|
-| Simple retrieval | 1 LLM call (planner only, short-circuit) | 0 LLM calls (deterministic short-circuit) or 2 (agent calls retrieve + formats) |
-| Complex calculation | 2 LLM calls (planner + executor) | 2-3 LLM calls (retrieve + compute + format) |
-| Code complexity | High (two prompts, two models, hand-off logic) | Lower (one prompt, one agent, tools emit events) |
-| Plan visibility | Structured QueryPlan available for UI display | No explicit plan; agent decides internally |
-| Maintainability | Changes require updating two agents in sync | Single agent to update |
+| Aspect | Multi-agent (previous) | Single agent (decided) |
+|--------|------------------------|------------------------|
+| Simple retrieval | 1 LLM call (planner + short-circuit) | 0 LLM calls (deterministic short-circuit) |
+| Complex calculation | 2 LLM calls + pre-population | 2-3 LLM round-trips (tool loop) |
+| Code complexity | High (two prompts, hand-off, pre-population) | Low (one prompt, one agent) |
+| Plan visibility | Structured QueryPlan before execution | Preserved — model writes an explicit plan via the `Planning` capability; steps stream live as they execute |
+| Multi-turn threads | Not supported (fresh context per agent) | Native via `message_history` |
+| Conversation recall | None (agent blind to past queries) | `get_recent_questions` + `search_past_questions` tools + cache-hit provenance in prompt |
+| Failure isolation | Planner failure → fallback planner; executor failure → retry executor | Single run retried wholesale (3 attempts) — simpler but coarser |
+| Dependencies | pydantic-ai only | pydantic-ai only — plan enforcement is custom tools, no harness needed (harness `Planning` optional for the plan reminder) |
 
-**Why keep two agents for now?** The structured `QueryPlan` is a significant UX advantage — users see the execution plan before calculations run, building trust and enabling debugging ("the planner misidentified the field name"). A single agent would make tool calls opaquely, and users would only see results after completion. The two-agent split also enables the short-circuit optimization (if all steps are retrievals, skip the executor), which saves 1 LLM call on ~40% of queries. The trade-off: maintaining two system prompts in sync (when a new tool is added, both prompts need updating) and the hand-off prompt construction logic (~100 lines of code). For a production system with many users, the latency savings from the short-circuit and the UX value of plan visibility outweigh the maintenance cost.
+**Net result:** the user keeps the deconstructed plan view (step 1, 2, 3 with short action descriptions) driven by the model's own `write_plan`/`update_task_status` calls, gains live tool-call progress, and the reasoning between steps is surfaced via the `Thinking` capability. The short-circuit keeps simple lookups at 0 LLM calls, so the common path gets *faster* (previously 1 planner call; now 0).
 
 ### Key Risk
 
-Loss of explicit plan visibility in the UI. Currently the `plan` SSE event shows the user exactly what steps will be executed. With a single agent, there's no structured plan — the agent just calls tools iteratively. Mitigation: emit tool-call events as "steps" so the user still sees progress, just without a pre-execution plan.
+Token cost per complex query may rise: the model re-reads accumulated tool results each round-trip (message history grows within the run). Mitigation: keep prompts tight, prefer `retrieve_batch` (one call returns all years), and rely on the existing result cache so repeated retrievals are cheap. Monitor per-query `total_tokens`/`total_cost_usd` in Langfuse after the refactor — this is exactly what the observability layer was built for.
 
 ---
 
@@ -1369,21 +1633,73 @@ User query arrives
   │
   ├─ Embedding model loaded?
   │    YES → semantic cache lookup
-  │    NO  → skip semantic cache, fall through to pipeline
+  │    NO  → skip semantic cache, fall through to the agent run
   │
-  ├─ Planner LLM call succeeds?
-  │    YES → proceed to pre-population / executor
-  │    NO  → Pydantic AI retries (2 retries, then error SSE event)
-  │
-  ├─ Executor LLM call succeeds?
+  ├─ Agent run succeeds?
   │    YES → return ExecutionResult
-  │    NO  → Pydantic AI retries (2 retries, then error SSE event)
+  │    NO  → _run_with_fallback: 3 attempts (retry + model fallback),
+  │         then error SSE event
   │
   └─ Cache write fails?
        → log warning, continue (cache is optimization, not correctness)
 ```
 
-### 16.2 Redis → SQLite Fallback (Dual-Write Strategy)
+### 16.2 The Single-Agent Failure Model (Plan → Execute → Observe → Recover)
+
+Because one agent now plans, executes, and observes, failures are handled **inside the agent loop first**, escalating outward only when the agent itself cannot recover. Each layer is cheaper than the next:
+
+```
+Layer 0 — Prevent: deterministic short-circuit
+    Simple lookups never reach the LLM → no LLM failure mode exists.
+
+Layer 1 — Tool failure → agent self-corrects (the "observe" step)
+    retrieve miss:      tool returns "ERROR: field 'Revenu' not found. Available: Revenue, ..."
+                        → agent SEES the error + the valid field list in its context
+                        → reasons (Thinking) → retries with corrected field name
+    sandbox error:      execute_python_code returns "ERROR: TypeError: ..."
+                        → agent reads the traceback, fixes the code, retries
+    Tool errors NEVER raise — they return error strings as tool results,
+    so the model can observe and adapt. pydantic-ai's ModelRetry is used
+    only for structurally invalid tool args (wrong types), where a retry
+    prompt with the validation message is sent automatically.
+
+Layer 2 — Output validation failure → pydantic-ai result_retries
+    Malformed ExecutionResult (bad JSON, missing friendly_response)
+    → validation error sent back to the model as a correction prompt
+    → 3 attempts total (result_retries=2). No tool work is lost —
+      the accumulated message history (retrieved values, plan state) is
+      preserved across validation retries.
+
+Layer 3 — Whole-run failure → _run_with_fallback
+    If the run exhausts retries (LLM API down, repeated validation failure):
+    → attempt 2 with FALLBACK_MODEL_ID, attempt 3 with FALLBACK_MODEL_ID
+    → each attempt is a fresh agent.run() (fresh context, ~zero token carryover)
+    → per-attempt tokens/cost/errors recorded on excel-chat:agent_attempt spans
+    → all 3 fail → "The AI model could not process this query..." SSE error
+
+Layer 4 — Infrastructure failure → degrade, never block
+    S3 sheet failure    → skip sheet, continue with remaining (partial answer)
+    Redis failure       → SQLite fallback (dual-write pattern, §16.3)
+    Semantic cache down → skip cache, run the agent anyway
+    Cache write failure → log warning, answer already delivered
+    Langfuse down       → spans no-op, query unaffected (graceful degradation)
+```
+
+**Key property:** the agent's observe phase is the first line of defense. In the old multi-agent design, a pre-population error string was passed to the executor as an opaque fact in its prompt. Now the agent sees the error *in its own tool result*, reasons about it, and chooses the recovery — retry with corrected args, try a different tool, or explain the limitation in `friendly_response`. This makes recovery model-driven instead of orchestration-driven.
+
+**What can and cannot break the user:**
+
+| Failure | User impact | Why |
+|---------|-------------|-----|
+| Redis down | None (SQLite fallback) | Dual-write pattern |
+| One S3 sheet fails | Partial answer, warning logged | Query proceeds with remaining sheets |
+| Embedding model down | No semantic cache (slower, still correct) | Cache is an optimization |
+| Sandbox error in generated code | Agent self-corrects (observe → retry); if unfixable, explained in `friendly_response` | Tool errors are model-visible |
+| Wrong field retrieved | Semantically wrong answer possible | Structure-valid; mitigation is prompt quality + worked examples |
+| LLM API down | 3 attempts across 2 models, then friendly error SSE | `_run_with_fallback` |
+| Langfuse down | Nothing — traces dropped, app unaffected | Graceful degradation |
+
+### 16.3 Redis → SQLite Fallback (Dual-Write Strategy)
 
 Every cache module follows the same pattern: **Redis first, SQLite fallback, dual-write on success**.
 
@@ -1395,23 +1711,23 @@ Every cache module follows the same pattern: **Redis first, SQLite fallback, dua
 
 **Redis client reset:** When a Redis operation fails (connection timeout, auth error, network issue), `reset_redis_client()` sets `_redis_client = None`. The next `_get_redis()` call attempts to create a new connection. This handles transient network blips without manual intervention. The trade-off: if Redis is permanently down, every cache operation attempts a connection, fails, and falls back — adding ~50-100ms per operation for the failed connection attempt. For a capstone project, this is acceptable; for production, a circuit breaker pattern would be better (stop trying Redis for 30s after N consecutive failures).
 
-### 16.3 LLM Retry Logic (Pydantic AI)
+### 16.4 LLM Retry Logic (Pydantic AI)
 
-Both planner and executor agents are configured with `result_retries=2` (3 total attempts). Pydantic AI handles retries automatically:
+The agent is configured with `result_retries=2` (3 total attempts). Pydantic AI handles retries automatically:
 
-1. **Attempt 1:** LLM generates response → Pydantic validates against result type (`QueryPlan` or `ExecutionResult`)
+1. **Attempt 1:** LLM generates response → Pydantic validates against result type (`ExecutionResult`)
 2. **Validation fails** (malformed JSON, missing fields, wrong types) → Pydantic AI sends the validation error back to the LLM as a correction prompt
 3. **Attempt 2:** LLM regenerates with the correction feedback → validate again
 4. **Attempt 3:** Final attempt → if still invalid, `ValidationError` is raised
 
 **What triggers a retry:**
 - Malformed JSON output (LLM returns text instead of structured response)
-- Missing required fields (e.g., `task_type` absent from `QueryPlan`)
-- Wrong field types (e.g., `plan` is a string instead of a dict)
+- Missing required fields (e.g., `friendly_response` absent from `ExecutionResult`)
+- Wrong field types (e.g., `step_results` is a string instead of a dict)
 - LLM API error (rate limit, timeout, 500)
 
 **What does NOT trigger a retry:**
-- Valid response with semantically wrong content (e.g., planner classifies "revenue" as "give_advice") — the structure is valid, so Pydantic accepts it. This is a model quality issue, not a validation issue.
+- Valid response with semantically wrong content (e.g., the agent retrieves the wrong field) — the structure is valid, so Pydantic accepts it. This is a model quality issue, not a validation issue.
 - Tool execution failures (sandbox errors, retrieve misses) — these are returned to the LLM as tool results, not validation errors.
 
 **User-facing error:** If all retries are exhausted, the exception propagates to `stream_generator()`, which catches it and emits:
@@ -1422,7 +1738,7 @@ data: {"message": "The AI model could not process this query. Please try rephras
 
 The original error message ("Exceeded maximum retries") is rewritten to a user-friendly string, shielding the user from internal details.
 
-### 16.4 S3 Failure Modes
+### 16.5 S3 Failure Modes
 
 | Failure | What happens | User impact |
 |---------|-------------|-------------|
@@ -1431,9 +1747,9 @@ The original error message ("Exceeded maximum retries") is rewritten to a user-f
 | **S3 DELETE failure** (file deletion) | `delete_from_s3()` raises → caught, SQLite metadata still deleted | File disappears from UI but orphaned in S3 (cleanup cron handles later) |
 | **S3 lifecycle expiry** (90-day TTL) | Object deleted by AWS → next query skips the sheet | Query may return fewer sheets than expected; daily cron cleans SQLite metadata |
 
-**Partial S3 failure handling:** If a query touches 5 sheets across 3 files and one file's S3 GET fails, the query proceeds with the 4 available sheets. The failed sheet is logged but doesn't abort the entire query. This is a deliberate trade-off: a partial answer is more useful than no answer. The trade-off: the planner's plan may reference the missing sheet, causing a retrieve tool to return `"ERROR: ... not found"`. The executor agent handles this by reporting the missing data in its `friendly_response`.
+**Partial S3 failure handling:** If a query touches 5 sheets across 3 files and one file's S3 GET fails, the query proceeds with the 4 available sheets. The failed sheet is logged but doesn't abort the entire query. This is a deliberate trade-off: a partial answer is more useful than no answer. The trade-off: the agent may attempt to retrieve from the missing sheet, causing the retrieve tool to return `"ERROR: ... not found"`. The agent handles this by reporting the missing data in its `friendly_response`.
 
-### 16.5 Semantic Cache Failure Modes
+### 16.6 Semantic Cache Failure Modes
 
 | Failure | What happens | Pipeline impact |
 |---------|-------------|----------------|
@@ -1445,7 +1761,7 @@ The original error message ("Exceeded maximum retries") is rewritten to a user-f
 
 **Key principle:** Semantic cache failures **never break a query**. The code comment at `main.py:512` explicitly states: "Semantic cache failure must NEVER break a query — degrade to exact-match cache + full pipeline." Every cache operation is wrapped in try/except with a pass-through fallback.
 
-### 16.6 SQLite Failure Modes
+### 16.7 SQLite Failure Modes
 
 | Failure | What happens | Impact |
 |---------|-------------|-------|
@@ -1457,7 +1773,7 @@ The original error message ("Exceeded maximum retries") is rewritten to a user-f
 
 **Connection management:** Each CRUD function opens its own connection via `_get_db()`, executes, commits, and closes. This avoids connection pool management but means every operation pays ~1ms connection overhead. For the current single-process deployment, this is fine. For multi-worker deployments, SQLite's WAL mode should be enabled (`PRAGMA journal_mode=WAL`) to allow concurrent readers + one writer without blocking.
 
-### 16.7 Upload Pipeline Failure Modes
+### 16.8 Upload Pipeline Failure Modes
 
 The upload flow has multiple failure points, each handled independently:
 
@@ -1475,9 +1791,9 @@ File upload
 
 **Orphaned S3 objects:** If sheet metadata save fails after S3 upload succeeds, the Excel file exists in S3 but has no SQLite metadata. The app won't show it in the UI, and the daily cleanup cron won't find it (it queries SQLite, not S3). Mitigation: the S3 lifecycle policy (90-day expiry) eventually cleans it up. For production, a reconciliation job should scan S3 and compare against SQLite metadata.
 
-**Auto-description failure is non-blocking:** If the LLM fails to generate descriptions during upload, the upload still succeeds — sheets appear in the UI with empty descriptions. The planner agent can still use field names and years for planning. Descriptions enhance plan accuracy but aren't required for the pipeline to function.
+**Auto-description failure is non-blocking:** If the LLM fails to generate descriptions during upload, the upload still succeeds — sheets appear in the UI with empty descriptions. The agent can still use field names and years for retrieval. Descriptions enhance retrieval accuracy but aren't required for the pipeline to function.
 
-### 16.8 Streaming Failure Modes
+### 16.9 Streaming Failure Modes
 
 | Failure | What happens | User sees |
 |---------|-------------|-----------|
@@ -1488,7 +1804,7 @@ File upload
 
 **No SSE resume:** If the connection drops mid-stream, the browser's `EventSource` will attempt to reconnect, but the backend has no way to resume a partial stream. The user must re-submit the query. If the pipeline completed before the disconnect, the result is in the semantic cache — the re-submitted query will hit the cache and return instantly. This is a graceful degradation: the user experiences a brief inconvenience (re-submit) but gets an instant cached response.
 
-### 16.9 APScheduler Failure
+### 16.10 APScheduler Failure
 
 If `apscheduler` is not installed (ImportError), the app starts without the daily cleanup cron:
 
@@ -1502,15 +1818,16 @@ except ImportError:
 
 The app prints a warning but continues. The trade-off: stale cache entries and expired file metadata accumulate without cleanup. For production, APScheduler should be a hard dependency (move to `requirements.txt` without try/except). For development, this graceful degradation lets the app run without installing optional dependencies.
 
-### 16.10 Failure Mode Summary: What Can and Cannot Break the User
+### 16.11 Failure Mode Summary: What Can and Cannot Break the User
 
 | Can break (user sees error) | Cannot break (degraded but functional) |
 |----------------------------|---------------------------------------|
-| LLM API down (all retries exhausted) | Redis down (SQLite fallback) |
-| No sheets uploaded | Semantic cache down (cache miss, pipeline runs) |
+| LLM API down (all retries + model fallback exhausted) | Redis down (SQLite fallback) |
+| No sheets uploaded | Semantic cache down (cache miss, agent runs) |
 | All S3 files unreadable | One S3 file unreadable (partial results) |
 | SQLite DB corrupted | Auto-description LLM fails (empty descriptions) |
 | OpenRouter API key missing | Cache invalidation fails (stale cache until TTL) |
 | Sandbox infinite loop (no timeout) | APScheduler not installed (no cleanup cron) |
+| | Langfuse down (traces dropped, app unaffected) |
 
-**Design principle:** The system distinguishes **critical path** (LLM calls, S3 reads, SQLite metadata) from **optimization path** (caching, auto-descriptions, cleanup). Critical path failures return errors to the user. Optimization path failures are logged and degraded gracefully. This ensures the user always gets an answer when the core pipeline is functional, even if every cache and enhancement layer is broken.
+**Design principle:** The system distinguishes **critical path** (agent run, S3 reads, SQLite metadata) from **optimization path** (caching, auto-descriptions, observability, cleanup). Critical path failures return errors to the user. Optimization path failures are logged and degraded gracefully. This ensures the user always gets an answer when the agent and its data sources are functional, even if every cache and enhancement layer is broken.

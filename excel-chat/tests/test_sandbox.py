@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 backend_src = Path(__file__).parent.parent / "backend" / "src"
 sys.path.insert(0, str(backend_src))
 
-from pipeline import PipelineDeps, execute_python_code
+from tools import PipelineDeps, execute_python_code
 from pydantic_ai import RunContext
 
 
@@ -162,7 +162,7 @@ def test_named_operations():
     """Test the NAMED_OPERATIONS functions directly."""
     print("Testing named operations...")
     
-    from pipeline import NAMED_OPERATIONS
+    from tools import NAMED_OPERATIONS
     
     # Unary operations
     assert NAMED_OPERATIONS["sqrt"](16) == 4.0, "sqrt(16) should be 4.0"

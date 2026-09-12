@@ -1,31 +1,22 @@
 from fastapi import FastAPI, Header, UploadFile, HTTPException, Request
 from excelservices import ExcelService
-# from vectordbservices import VectorDBService  # ChromaDB disabled
-from queryservices import QueryService
 import pandas as pd
-from io import StringIO, BytesIO
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pipeline import build_query_pipeline, generate_user_friendly_response, timed
+from pipeline import build_query_pipeline, timed
 import json
 import os
 import uuid
 from contextlib import asynccontextmanager
-from openai import OpenAI
-from llama_index.core.prompts import PromptTemplate
-from llama_index.core.llms import ChatMessage, MessageRole
 from dotenv import load_dotenv
 from pathlib import Path
-from classification_template import ClassTemplates
 from sheet_metadata import (
     init_db, save_file, save_sheet, get_all_sheets, get_all_files,
-    update_sheet_description, delete_file, get_sheets_by_file,
-    upload_to_s3, download_from_s3, delete_from_s3, SheetMeta,
+    update_sheet_description, delete_file,
+    upload_to_s3,
     read_excel_from_s3,
     get_cache_stats, cleanup_old_cache_entries,
     touch_file_access, find_stale_files, delete_files_older_than,
-    invalidate_user_cache as sqlite_invalidate_user_cache,
     create_thread, get_threads, get_thread, update_thread, delete_thread,
     get_thread_sheet_ids, save_message, get_thread_messages,
     auto_title_thread, find_similar_in_thread, get_sheet,
@@ -39,8 +30,6 @@ from pydantic import BaseModel as PydanticBaseModel
 from guardrails import (
     validate_file_upload,
     screen_query,
-    inject_disclaimer,
-    check_data_sensitivity,
     detect_sensitive_data_in_dataframe,
     sanitize_dataframe,
     ACCEPTED_EXTENSIONS,
@@ -53,7 +42,6 @@ load_dotenv()
 
 # Initialise Langfuse observability (must run before any Agent is constructed)
 init_observability()
-
 
 # ---------------------------------------------------------------------------
 # Application-level cron: APScheduler runs daily_cleanup() at 3 AM. This pairs
@@ -307,14 +295,12 @@ async def confirm_upload(
     sanitized_sheets: dict[str, pd.DataFrame] = {}
     redaction_count = 0
     for sheet_name, df in raw_sheets.items():
-        before = df.astype(str).values.tolist()
-        df = sanitize_dataframe(df)
-        after = df.astype(str).values.tolist()
-        for r_before, r_after in zip(before, after):
-            for v_before, v_after in zip(r_before, r_after):
-                if v_before != v_after:
-                    redaction_count += 1
-        sanitized_sheets[sheet_name] = df
+        before = df.astype(str)
+        sanitized = sanitize_dataframe(df)
+        after = sanitized.astype(str)
+        # Vectorized cell-by-cell comparison — counts changed cells in one op
+        redaction_count += int((before.values != after.values).sum())
+        sanitized_sheets[sheet_name] = sanitized
 
     # Write sanitized sheets back to a new Excel file
     sanitized_path = os.path.join(UPLOAD_FOLDER, filename)
@@ -579,11 +565,6 @@ async def query_rag(
             # exact-match cache + full pipeline.
             print(f"⚠️ Semantic cache lookup failed: {e}")
 
-        client = OpenAI(
-            base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-            api_key=OPENROUTER_API_KEY
-        )
-
         # Load all sheets from DB (scoped to the requesting user).
         all_sheet_metas = get_all_sheets(user_id=user_id)
         if not all_sheet_metas:
@@ -626,28 +607,9 @@ async def query_rag(
         print(f"Processing query: {query}")
         print(f"Loaded {len(sheets)} sheets: {list(sheets.keys())}")
 
-        # Build sheet context for classification template
-        sheet_context_parts = []
-        for meta in all_sheet_metas:
-            if meta.sheet_name in sheets:
-                group_note = f" (schema group: {meta.schema_group})" if meta.schema_group and meta.schema_group != "unique" else ""
-                desc_note = f"\n      Description: {meta.combined_description}" if meta.combined_description != "No description available." else ""
-                sheet_context_parts.append(
-                    f"  - Sheet '{meta.sheet_name}' (file: {meta.file_name}){group_note}\n"
-                    f"      Fields: {', '.join(meta.fields[:20])}\n"
-                    f"      Years: {', '.join(meta.years)}{desc_note}"
-                )
-        sheet_context = "\n".join(sheet_context_parts)
-
-        # Format classification template with sheet context
-        template = ClassTemplates.CLASSIFIER_PROMPT.format(
-            sheet_context=sheet_context,
-            query=query,
-        )
-
         # Build and run pipeline
         pipeline = build_query_pipeline(
-            client, sheets, all_sheet_metas, PromptTemplate(template),
+            sheets, all_sheet_metas,
             user_id=user_id,
         )
         with timed("pipeline", timings):
@@ -714,14 +676,17 @@ async def query_stream(
     """Stream query results as Server-Sent Events.
 
     Event types:
-      - status:    {"message": "..."}
-      - plan:      {"task_type": "...", "plan": {...}, "items": [...], ...}
-      - pre_populated: {"values": {...}}
-      - execution: {"step_results": {...}, "final_answer": ..., "explanation": "..."}
-      - friendly:  {"response": "..."}
-      - done:      {"timings": {...}, "total": ..., "message_id": "..."}
-      - error:     {"message": "..."}
-      - cached:    {"answer": ..., "friendly_response": ..., "similarity": ...}
+      - status:         {"message": "..."}
+      - plan:           {"task_type": "...", "plan": {...}, "items": [...], ...}  (validated plan from write_plan)
+      - step_started:   {"step_id": "..."}
+      - tool_call:      {"tool": "retrieve_values", "args": {...}}
+      - tool_result:    {"tool": "...", "result": "..."}
+      - step_completed: {"step_id": "..."}
+      - execution:      {"step_results": {...}, "final_answer": ..., "explanation": "..."}
+      - friendly:       {"response": "..."}
+      - done:           {"timings": {...}, "total": ..., "message_id": "..."}
+      - error:          {"message": "..."}
+      - cached:         {"answer": ..., "friendly_response": ..., "similarity": ...}
 
     Optional params:
       - thread_id: If provided, Q&A is persisted to the messages table
@@ -868,23 +833,6 @@ async def query_stream(
                 return
 
             # --- Build and run pipeline with streaming callback ---
-            sheet_context_parts = []
-            for meta in all_sheet_metas:
-                if meta.sheet_name in sheets:
-                    group_note = f" (schema group: {meta.schema_group})" if meta.schema_group and meta.schema_group != "unique" else ""
-                    desc_note = f"\n      Description: {meta.combined_description}" if meta.combined_description != "No description available." else ""
-                    sheet_context_parts.append(
-                        f"  - Sheet '{meta.sheet_name}' (file: {meta.file_name}){group_note}\n"
-                        f"      Fields: {', '.join(meta.fields[:20])}\n"
-                        f"      Years: {', '.join(meta.years)}{desc_note}"
-                    )
-            sheet_context = "\n".join(sheet_context_parts)
-
-            template = ClassTemplates.CLASSIFIER_PROMPT.format(
-                sheet_context=sheet_context,
-                query=query,
-            )
-
             # The callback pushes events into the asyncio queue.
             # Since the pipeline runs as a coroutine in the same event loop,
             # we can use put_nowait — no thread-safety concerns.
@@ -893,7 +841,7 @@ async def query_stream(
                 event_queue.put_nowait((event_type, payload))
 
             pipeline = build_query_pipeline(
-                None, sheets, all_sheet_metas, PromptTemplate(template),
+                sheets, all_sheet_metas,
                 user_id=user_id, on_event=on_event,
             )
 

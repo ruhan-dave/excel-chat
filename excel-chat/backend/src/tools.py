@@ -132,6 +132,21 @@ class PipelineDeps:
     available_fields: list[str] = field(default_factory=list)
     available_years: list[str] = field(default_factory=list)
     user_id: str = "anonymous"
+    # SSE emitter: called as on_event(event_type, payload_dict). Tools emit
+    # progress events (tool_call / tool_result) through it so the frontend
+    # sees each step of the agent run in real time.
+    on_event: Callable[[str, dict[str, Any]], None] | None = None
+    # The validated execution plan written by the agent's write_plan tool.
+    # Read by the deterministic short-circuit check and result caching.
+    plan: Any = None
+
+    def emit(self, event_type: str, data: dict[str, Any]) -> None:
+        """Safely emit an SSE event via the injected callback (no-op if unset)."""
+        if self.on_event:
+            try:
+                self.on_event(event_type, data)
+            except Exception:
+                pass  # observability/progress must never break the query
 
     @property
     def df(self) -> pd.DataFrame:
@@ -193,12 +208,17 @@ def retrieve_values(
     if not years:
         return "ERROR: 'years' parameter is required. Pass a list like ['2023'] or ['2020', '2021', '2022']."
 
+    ctx.deps.emit("tool_call", {"tool": "retrieve_values", "args": {"field": field, "years": years, "sheet": sheet}})
+
     # Single year — delegate to the single-value logic for a clean string return
     if len(years) == 1:
-        return _retrieve_single(ctx, field, years[0], sheet)
-
+        result = _retrieve_single(ctx, field, years[0], sheet)
     # Multiple years — batch retrieval with JSON output
-    return _retrieve_multi(ctx, field, years, sheet)
+    else:
+        result = _retrieve_multi(ctx, field, years, sheet)
+
+    ctx.deps.emit("tool_result", {"tool": "retrieve_values", "result": str(result)[:500]})
+    return result
 
 
 def _retrieve_single(ctx: RunContext[PipelineDeps], field: str, year: str, sheet: str = "") -> str:
@@ -347,11 +367,14 @@ async def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
     import io
     import sys
 
+    ctx.deps.emit("tool_call", {"tool": "execute_python_code", "args": {"code": code[:300]}})
+
     # Layer 2: Check sandbox cache before executing
     try:
         from result_cache import sandbox_cache_get, sandbox_cache_set
         cached = sandbox_cache_get(ctx.deps.user_id, code)
         if cached is not None:
+            ctx.deps.emit("tool_result", {"tool": "execute_python_code", "result": str(cached)[:500], "cached": True})
             return cached
     except Exception:
         pass
@@ -511,13 +534,16 @@ np_histogram: Any = None
             except Exception:
                 pass
 
+            ctx.deps.emit("tool_result", {"tool": "execute_python_code", "result": str(result)[:500]})
             return result
 
         finally:
             sys.stdout = old_stdout
 
     except Exception as e:
-        return f"ERROR: {type(e).__name__}: {str(e)}"
+        error = f"ERROR: {type(e).__name__}: {str(e)}"
+        ctx.deps.emit("tool_result", {"tool": "execute_python_code", "result": error[:500], "error": True})
+        return error
 
 
 # ============================================================================

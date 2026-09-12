@@ -24,7 +24,7 @@ import pytest
 BACKEND_SRC = Path(__file__).parent.parent / "backend" / "src"
 sys.path.insert(0, str(BACKEND_SRC))
 
-from pipeline import PipelineDeps, retrieve_values, execute_python_code
+from tools import PipelineDeps, retrieve_values, execute_python_code
 from pydantic_ai import RunContext
 
 

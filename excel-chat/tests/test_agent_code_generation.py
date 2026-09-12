@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 backend_src = Path(__file__).parent.parent / "backend" / "src"
 sys.path.insert(0, str(backend_src))
 
-from pipeline import PipelineDeps, execute_python_code
+from tools import PipelineDeps, execute_python_code
 
 
 def _run(ctx, code):

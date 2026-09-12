@@ -262,8 +262,13 @@ def observe_agent_run(
     session_id: str | None = None,
     tags: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    release: str | None = None,
 ) -> Generator[Optional[_SpanProxy], None, None]:
     """Trace-level span + propagated attributes (user/session/tags/metadata).
+
+    The *release* parameter tags every trace with a version string so test
+    runs can be distinguished in the Langfuse UI. Defaults to the ``RELEASE``
+    env var (e.g. ``RELEASE=v0.4.0`` or ``RELEASE=test-run-1``).
 
     No-op when observability is disabled (yields ``None``).
     """
@@ -271,6 +276,16 @@ def observe_agent_run(
     if client is None:
         yield None
         return
+
+    # Resolve release tag — explicit param > env var > None
+    release_tag = release or os.environ.get("RELEASE")
+    # Merge release into metadata so it's visible + queryable in Langfuse
+    trace_metadata = dict(metadata or {})
+    if release_tag:
+        trace_metadata["release"] = release_tag
+    trace_tags = list(tags or [])
+    if release_tag and release_tag not in trace_tags:
+        trace_tags.append(release_tag)
 
     try:
         from langfuse import propagate_attributes
@@ -281,15 +296,15 @@ def observe_agent_run(
         with client.start_as_current_observation(
             as_type="span",
             name=name,
-            metadata=metadata,
+            metadata=trace_metadata or None,
         ) as span:
             if propagate_attributes is not None:
                 try:
                     with propagate_attributes(
                         user_id=user_id,
                         session_id=session_id,
-                        tags=tags or [],
-                        metadata=metadata or {},
+                        tags=trace_tags,
+                        metadata=trace_metadata,
                     ):
                         yield _SpanProxy(span)
                 except Exception:

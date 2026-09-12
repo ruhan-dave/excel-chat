@@ -21,6 +21,7 @@ const PromptInput = () => {
     // Refs to track current state inside EventSource callbacks (avoids stale closures)
     const answerRef = useRef<Record<string, unknown>>({});
     const friendlyRef = useRef("");
+    const doneRef = useRef(false);
     const apiURL = import.meta.env.VITE_API_ENDPOINT;
 
     const addStep = useCallback((label: string, detail: string) => {
@@ -43,6 +44,7 @@ const PromptInput = () => {
         answerRef.current = {};
         setFriendlyResponse("");
         friendlyRef.current = "";
+        doneRef.current = false;
         setStatusMsg("Connecting…");
         setSteps([]);
         setPlanData(null);
@@ -133,6 +135,7 @@ const PromptInput = () => {
 
         es.addEventListener("done", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
+            doneRef.current = true;
             addStep("Complete", `Total time: ${data.total?.toFixed(1) || "?"}s`);
             setLoading(false);
             setStatusMsg("");
@@ -141,42 +144,34 @@ const PromptInput = () => {
         });
 
         es.addEventListener("error", (e: MessageEvent) => {
-            // Distinguish server-sent errors (has e.data) from connection drops.
-            // For connection drops: keep whatever partial results we already
-            // have — the user saw streaming progress and shouldn't lose it.
-            let errorMsg = "Failed to get response from server.";
-            let isConnectionDrop = false;
+            // If we already received "done", this is just the connection
+            // closing after completion — ignore it entirely.
+            if (doneRef.current) {
+                es.close();
+                eventSourceRef.current = null;
+                return;
+            }
+
+            // Parse error message from server-sent error events (has e.data).
+            // Connection drops have no e.data.
+            let errorMsg = "Connection lost. Partial results shown below.";
             try {
                 if (e.data) {
                     const data = JSON.parse(e.data);
-                    errorMsg = data.message || errorMsg;
-                } else {
-                    isConnectionDrop = true;
-                    if (isLoading) {
-                        errorMsg = "Connection lost. Partial results shown below.";
-                    }
+                    errorMsg = data.message || "Failed to get response from server.";
                 }
             } catch {
-                isConnectionDrop = true;
-                if (isLoading) {
-                    errorMsg = "Connection lost. Partial results shown below.";
-                }
+                // e.data is not valid JSON — connection drop
             }
+
+            // NEVER wipe existing results. If we have any answer or friendly
+            // response, keep them and append the error note. Only show a
+            // standalone error if we have absolutely nothing.
             const hasAnswer = Object.keys(answerRef.current).length > 0;
             const hasFriendly = !!friendlyRef.current;
-            if (isConnectionDrop && (hasAnswer || hasFriendly)) {
-                // Connection drop with partial results — keep them, append note
-                if (hasFriendly) {
-                    setFriendlyResponse(prev => `${prev}\n\n⚠️ ${errorMsg}`);
-                } else {
-                    setFriendlyResponse(`⚠️ ${errorMsg}`);
-                }
-            } else if (!isConnectionDrop && (hasAnswer || hasFriendly)) {
-                // Server-sent error but we have partial results — keep them
-                setFriendlyResponse(prev => prev ? `${prev}\n\nError: ${errorMsg}` : `Error: ${errorMsg}`);
+            if (hasAnswer || hasFriendly) {
+                setFriendlyResponse(prev => prev ? `${prev}\n\n⚠️ ${errorMsg}` : `⚠️ ${errorMsg}`);
             } else {
-                // No results at all — show error
-                setAnswer({});
                 setFriendlyResponse(`Error: ${errorMsg}`);
             }
             setLoading(false);

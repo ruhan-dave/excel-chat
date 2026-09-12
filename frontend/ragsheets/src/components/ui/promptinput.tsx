@@ -18,6 +18,9 @@ const PromptInput = () => {
     const [steps, setSteps] = useState<StreamStep[]>([]);
     const [planData, setPlanData] = useState<Record<string, unknown> | null>(null);
     const eventSourceRef = useRef<EventSource | null>(null);
+    // Refs to track current state inside EventSource callbacks (avoids stale closures)
+    const answerRef = useRef<Record<string, unknown>>({});
+    const friendlyRef = useRef("");
     const apiURL = import.meta.env.VITE_API_ENDPOINT;
 
     const addStep = useCallback((label: string, detail: string) => {
@@ -37,7 +40,9 @@ const PromptInput = () => {
         }
         setLoading(true);
         setAnswer({});
+        answerRef.current = {};
         setFriendlyResponse("");
+        friendlyRef.current = "";
         setStatusMsg("Connecting…");
         setSteps([]);
         setPlanData(null);
@@ -72,23 +77,57 @@ const PromptInput = () => {
             addStep("Data Retrieved", `${count} value(s) fetched from sheets`);
         });
 
+        es.addEventListener("step_started", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            addStep(`Step ${data.step_id}`, "in progress…");
+        });
+
+        es.addEventListener("step_completed", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            addStep(`Step ${data.step_id}`, "completed");
+        });
+
+        es.addEventListener("tool_call", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            const toolName = data.tool || "tool";
+            const args = data.args || {};
+            const argSummary = typeof args === "object"
+                ? Object.entries(args).map(([k, v]) => `${k}: ${v}`).join(", ")
+                : String(args);
+            addStep(`Tool: ${toolName}`, argSummary.slice(0, 80));
+        });
+
+        es.addEventListener("tool_result", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            const result = data.result || "";
+            const resultStr = typeof result === "object" ? JSON.stringify(result) : String(result);
+            addStep("Result", resultStr.slice(0, 80));
+        });
+
         es.addEventListener("execution", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
             const stepResults = data.step_results || {};
             const stepCount = Object.keys(stepResults).length;
             addStep("Calculations Complete", `${stepCount} step(s) executed`);
             setAnswer(stepResults);
+            answerRef.current = stepResults;
         });
 
         es.addEventListener("friendly", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
-            setFriendlyResponse(data.response || "");
+            const resp = data.response || "";
+            setFriendlyResponse(resp);
+            friendlyRef.current = resp;
         });
 
         es.addEventListener("cached", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
-            setAnswer(data.answer || {});
-            setFriendlyResponse(data.friendly_response || "");
+            const ans = data.answer || {};
+            const resp = data.friendly_response || "";
+            setAnswer(ans);
+            answerRef.current = ans;
+            setFriendlyResponse(resp);
+            friendlyRef.current = resp;
             addStep("Cache Hit", `Retrieved from cache (similarity: ${((data.similarity || 0) * 100).toFixed(1)}%)`);
         });
 
@@ -102,20 +141,44 @@ const PromptInput = () => {
         });
 
         es.addEventListener("error", (e: MessageEvent) => {
+            // Distinguish server-sent errors (has e.data) from connection drops.
+            // For connection drops: keep whatever partial results we already
+            // have — the user saw streaming progress and shouldn't lose it.
             let errorMsg = "Failed to get response from server.";
+            let isConnectionDrop = false;
             try {
                 if (e.data) {
                     const data = JSON.parse(e.data);
                     errorMsg = data.message || errorMsg;
+                } else {
+                    isConnectionDrop = true;
+                    if (isLoading) {
+                        errorMsg = "Connection lost. Partial results shown below.";
+                    }
                 }
             } catch {
-                // EventSource error event (connection issue)
+                isConnectionDrop = true;
                 if (isLoading) {
-                    errorMsg = "Connection lost. Please try again.";
+                    errorMsg = "Connection lost. Partial results shown below.";
                 }
             }
-            setAnswer({});
-            setFriendlyResponse(`Error: ${errorMsg}`);
+            const hasAnswer = Object.keys(answerRef.current).length > 0;
+            const hasFriendly = !!friendlyRef.current;
+            if (isConnectionDrop && (hasAnswer || hasFriendly)) {
+                // Connection drop with partial results — keep them, append note
+                if (hasFriendly) {
+                    setFriendlyResponse(prev => `${prev}\n\n⚠️ ${errorMsg}`);
+                } else {
+                    setFriendlyResponse(`⚠️ ${errorMsg}`);
+                }
+            } else if (!isConnectionDrop && (hasAnswer || hasFriendly)) {
+                // Server-sent error but we have partial results — keep them
+                setFriendlyResponse(prev => prev ? `${prev}\n\nError: ${errorMsg}` : `Error: ${errorMsg}`);
+            } else {
+                // No results at all — show error
+                setAnswer({});
+                setFriendlyResponse(`Error: ${errorMsg}`);
+            }
             setLoading(false);
             setStatusMsg("");
             es.close();

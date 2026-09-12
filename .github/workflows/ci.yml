@@ -30,9 +30,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r backend/requirements.txt
-          pip install pytest pytest-asyncio
+          pip install --upgrade uv
+          uv pip install --system -r backend/requirements.txt
+          uv pip install --system pytest pytest-asyncio
 
       - name: Run tests
         env:
@@ -63,9 +63,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r backend/requirements.txt
-          pip install pytest pytest-asyncio requests
+          pip install --upgrade uv
+          uv pip install --system -r backend/requirements.txt
+          uv pip install --system pytest pytest-asyncio requests
 
       - name: Start backend server
         env:

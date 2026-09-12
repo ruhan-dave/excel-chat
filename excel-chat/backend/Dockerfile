@@ -27,8 +27,9 @@ RUN apt-get update && \
 
 COPY backend/requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# uv is significantly faster than pip for the ~200-package install
+RUN pip install --no-cache-dir uv && \
+    uv pip install --system --no-cache -r requirements.txt
 
 # Pre-download the sentence-transformers embedding model so the first query
 # doesn't pay the cold-load cost (Optimization 4: ~80MB MiniLM model).

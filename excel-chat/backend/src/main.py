@@ -485,7 +485,7 @@ async def query_rag(
 ):
     user_id = x_user_id or "anonymous"
     _rag_span_cm = observe_agent_run(
-        name="excel-chat:api:/query",
+        name=f"excel-chat:query: {query[:80]}",
         user_id=user_id,
         tags=["excel-chat", "api"],
         metadata={"query": query[:500]},
@@ -620,6 +620,13 @@ async def query_rag(
             if isinstance(pipeline_timings, dict):
                 timings.update(pipeline_timings)
 
+        # Attach final_answer to trace metadata for searchability
+        if span and isinstance(result, dict):
+            span.record(output={
+                "final_answer": result.get("final_answer", ""),
+                "friendly_response": result.get("friendly_response", "")[:200],
+            })
+
         # ------------------------------------------------------------------
         # Store the result in the semantic cache for future paraphrased hits.
         # Optimization 6: wrap in ``timed`` so embedding cost is visible.
@@ -699,7 +706,7 @@ async def query_stream(
 
     async def stream_generator():
         _stream_span_cm = observe_agent_run(
-            name="excel-chat:api:/query/stream",
+            name=f"excel-chat:query: {query[:80]}",
             user_id=user_id,
             tags=["excel-chat", "api", "stream"],
             metadata={"query": query[:500]},
@@ -866,6 +873,13 @@ async def query_stream(
 
             # Get the result and write to cache
             result = await pipeline_task
+
+            # Attach final_answer to trace metadata for searchability
+            if span and isinstance(result, dict):
+                span.record(output={
+                    "final_answer": result.get("final_answer", ""),
+                    "friendly_response": result.get("friendly_response", "")[:200],
+                })
 
             cache_model = os.environ.get("RAG_MODEL", "openrouter/query-pipeline")
             try:

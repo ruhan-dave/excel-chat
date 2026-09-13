@@ -18,6 +18,10 @@ const PromptInput = () => {
     const [steps, setSteps] = useState<StreamStep[]>([]);
     const [planData, setPlanData] = useState<Record<string, unknown> | null>(null);
     const eventSourceRef = useRef<EventSource | null>(null);
+    // Refs to track current state inside EventSource callbacks (avoids stale closures)
+    const answerRef = useRef<Record<string, unknown>>({});
+    const friendlyRef = useRef("");
+    const doneRef = useRef(false);
     const apiURL = import.meta.env.VITE_API_ENDPOINT;
 
     const addStep = useCallback((label: string, detail: string) => {
@@ -37,7 +41,10 @@ const PromptInput = () => {
         }
         setLoading(true);
         setAnswer({});
+        answerRef.current = {};
         setFriendlyResponse("");
+        friendlyRef.current = "";
+        doneRef.current = false;
         setStatusMsg("Connecting…");
         setSteps([]);
         setPlanData(null);
@@ -79,6 +86,33 @@ const PromptInput = () => {
             addStep("Data Retrieved", valueText || "No values fetched");
         });
 
+        es.addEventListener("step_started", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            addStep(`Step ${data.step_id}`, "in progress…");
+        });
+
+        es.addEventListener("step_completed", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            addStep(`Step ${data.step_id}`, "completed");
+        });
+
+        es.addEventListener("tool_call", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            const toolName = data.tool || "tool";
+            const args = data.args || {};
+            const argSummary = typeof args === "object"
+                ? Object.entries(args).map(([k, v]) => `${k}: ${v}`).join(", ")
+                : String(args);
+            addStep(`Tool: ${toolName}`, argSummary.slice(0, 80));
+        });
+
+        es.addEventListener("tool_result", (e: MessageEvent) => {
+            const data = JSON.parse(e.data);
+            const result = data.result || "";
+            const resultStr = typeof result === "object" ? JSON.stringify(result) : String(result);
+            addStep("Result", resultStr.slice(0, 80));
+        });
+
         es.addEventListener("execution", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
             const stepResults = data.step_results || {};
@@ -92,22 +126,30 @@ const PromptInput = () => {
                 addStep("Calculations Complete", resultsText || "No results");
             }
             setAnswer(stepResults);
+            answerRef.current = stepResults;
         });
 
         es.addEventListener("friendly", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
-            setFriendlyResponse(data.response || "");
+            const resp = data.response || "";
+            setFriendlyResponse(resp);
+            friendlyRef.current = resp;
         });
 
         es.addEventListener("cached", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
-            setAnswer(data.answer || {});
-            setFriendlyResponse(data.friendly_response || "");
+            const ans = data.answer || {};
+            const resp = data.friendly_response || "";
+            setAnswer(ans);
+            answerRef.current = ans;
+            setFriendlyResponse(resp);
+            friendlyRef.current = resp;
             addStep("Cache Hit", `Retrieved from cache (similarity: ${((data.similarity || 0) * 100).toFixed(1)}%)`);
         });
 
         es.addEventListener("done", (e: MessageEvent) => {
             const data = JSON.parse(e.data);
+            doneRef.current = true;
             addStep("Complete", `Total time: ${data.total?.toFixed(1) || "?"}s`);
             setLoading(false);
             setStatusMsg("");
@@ -116,20 +158,36 @@ const PromptInput = () => {
         });
 
         es.addEventListener("error", (e: MessageEvent) => {
-            let errorMsg = "Failed to get response from server.";
+            // If we already received "done", this is just the connection
+            // closing after completion — ignore it entirely.
+            if (doneRef.current) {
+                es.close();
+                eventSourceRef.current = null;
+                return;
+            }
+
+            // Parse error message from server-sent error events (has e.data).
+            // Connection drops have no e.data.
+            let errorMsg = "Connection lost. Partial results shown below.";
             try {
                 if (e.data) {
                     const data = JSON.parse(e.data);
-                    errorMsg = data.message || errorMsg;
+                    errorMsg = data.message || "Failed to get response from server.";
                 }
             } catch {
-                // EventSource error event (connection issue)
-                if (isLoading) {
-                    errorMsg = "Connection lost. Please try again.";
-                }
+                // e.data is not valid JSON — connection drop
             }
-            setAnswer({});
-            setFriendlyResponse(`Error: ${errorMsg}`);
+
+            // NEVER wipe existing results. If we have any answer or friendly
+            // response, keep them and append the error note. Only show a
+            // standalone error if we have absolutely nothing.
+            const hasAnswer = Object.keys(answerRef.current).length > 0;
+            const hasFriendly = !!friendlyRef.current;
+            if (hasAnswer || hasFriendly) {
+                setFriendlyResponse(prev => prev ? `${prev}\n\n⚠️ ${errorMsg}` : `⚠️ ${errorMsg}`);
+            } else {
+                setFriendlyResponse(`Error: ${errorMsg}`);
+            }
             setLoading(false);
             setStatusMsg("");
             es.close();

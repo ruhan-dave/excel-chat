@@ -2,8 +2,8 @@ name: Monitor
 
 on:
   schedule:
-    # Every 10 minutes
-    - cron: "*/10 * * * *"
+    # Every 30 minutes
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 jobs:

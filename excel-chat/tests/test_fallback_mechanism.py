@@ -182,9 +182,14 @@ def test_fallback_with_deps():
 
     result = asyncio.run(_run_with_fallback(build_agent, "test prompt", deps=deps))
     assert result == mock_result
-    # Verify deps were passed to both agents
-    primary_agent.run.assert_called_once_with("test prompt", deps=deps)
-    fallback_agent.run.assert_called_once_with("test prompt", deps=deps)
+    # Verify deps were passed to both agents (usage_limits is also passed
+    # by the pipeline — check deps via kwargs, not exact call match)
+    primary_agent.run.assert_called_once()
+    assert primary_agent.run.call_args.args[0] == "test prompt"
+    assert primary_agent.run.call_args.kwargs.get("deps") is deps
+    fallback_agent.run.assert_called_once()
+    assert fallback_agent.run.call_args.args[0] == "test prompt"
+    assert fallback_agent.run.call_args.kwargs.get("deps") is deps
 
 
 def test_connection_error_triggers_fallback():

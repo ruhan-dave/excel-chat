@@ -70,8 +70,8 @@ def test_cagr_calculation(pipeline):
 
 
 def test_trend_analysis(pipeline):
-    """Agent can analyze profit margin trends."""
-    result = asyncio.run(pipeline("Analyze the profit margin trend across all years"))
+    """Agent can analyze expense trends across all years."""
+    result = asyncio.run(pipeline("Analyze the expense trend across all years"))
     assert result is not None
     assert isinstance(result, dict)
 

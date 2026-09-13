@@ -706,6 +706,26 @@ def build_query_agent(
         """
         errors = validate_plan_semantics(plan, ctx.deps.sheet_metas)
         if errors:
+            ctx.deps.plan_rejections += 1
+            # Cap the revision loop: after 5 rejections, accept the plan as-is
+            # so a confused agent can't burn unlimited model requests.
+            if ctx.deps.plan_rejections >= 5:
+                ctx.deps.plan = plan
+                ctx.deps.emit("plan", {
+                    "task_type": plan.task_type,
+                    "plan": plan.model_dump().get("plan"),
+                    "items": plan.items,
+                    "description": plan.description,
+                })
+                print(f"⚠️ Plan accepted after {ctx.deps.plan_rejections} rejections "
+                      f"(validation bypassed): {plan.task_type}")
+                return (
+                    f"Plan accepted with warnings after {ctx.deps.plan_rejections} "
+                    "rejections (validation cap reached). Known issues:\n"
+                    + "\n".join(f"- {e}" for e in errors)
+                    + "\nProceed with execution now. If a retrieval fails, note it "
+                    "in friendly_response and continue with the data you have."
+                )
             return (
                 "PLAN REJECTED — fix these and call write_plan again:\n"
                 + "\n".join(f"- {e}" for e in errors)

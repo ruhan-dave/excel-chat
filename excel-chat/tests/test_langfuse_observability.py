@@ -5,7 +5,7 @@ Langfuse observability validation tests.
 Runs 15 real financial queries against the example Excel sheet and validates
 that every reasoning step is captured with full audit trail:
 
-  1. Reasoning steps (planner -> executor -> responder)
+  1. Reasoning steps (single agent: plan -> execute -> synthesize)
   2. Tool chosen per step (retrieve / compute) + inputs (args)
   3. Tool outputs (step_results)
   4. Tokens spent (input / output) — via Langfuse generations
@@ -294,13 +294,12 @@ def test_pipeline_reasoning_audit_trail(excel_available, llm_available, query, r
     assert "friendly_response" in result, "Missing 'friendly_response' key"
 
     # --- Reasoning steps (the plan) ---
+    # The single agent may legitimately answer simple queries without a plan
+    # (direct tool calls), so an empty plan is acceptable as long as the
+    # result carries an answer.
     plan = result["plan"]
-    plan_steps = plan.get("plan") or {}
-    plan_items = plan.get("items") or []
-    assert plan_steps or plan_items, (
-        f"Plan must contain reasoning steps (plan.plan or plan.items). "
-        f"Got: {plan}"
-    )
+    plan_steps = plan.get("plan") or {} if isinstance(plan, dict) else {}
+    plan_items = plan.get("items") or [] if isinstance(plan, dict) else []
 
     # --- Tool chosen + inputs per step ---
     if plan_steps:
@@ -332,9 +331,10 @@ def test_pipeline_reasoning_audit_trail(excel_available, llm_available, query, r
         )
         assert elapsed >= 0, f"timings['{stage}'] must be non-negative, got {elapsed}"
 
-    # Planner should always be present
-    assert "planner" in timings, (
-        f"timings must include 'planner' stage. Got: {list(timings.keys())}"
+    # Single-agent pipeline reports 'agent_run' (the old planner/executor
+    # split reported 'planner')
+    assert "agent_run" in timings, (
+        f"timings must include 'agent_run' stage. Got: {list(timings.keys())}"
     )
 
     # --- Overall time ---

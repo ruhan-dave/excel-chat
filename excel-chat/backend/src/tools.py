@@ -139,6 +139,9 @@ class PipelineDeps:
     # The validated execution plan written by the agent's write_plan tool.
     # Read by the deterministic short-circuit check and result caching.
     plan: Any = None
+    # Number of times write_plan has rejected the agent's plan. Caps the
+    # plan-revision loop so a confused agent can't burn unlimited requests.
+    plan_rejections: int = 0
 
     def emit(self, event_type: str, data: dict[str, Any]) -> None:
         """Safely emit an SSE event via the injected callback (no-op if unset)."""

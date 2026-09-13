@@ -133,6 +133,10 @@ async def _run_with_fallback(
                         run_kw["deps"] = deps
                     if message_history is not None:
                         run_kw["message_history"] = message_history
+                    # Allow more round-trips for complex multi-field queries
+                    # (growth rate comparisons need retrieve + compute + synthesize)
+                    from pydantic_ai.usage import UsageLimits
+                    run_kw["usage_limits"] = UsageLimits(request_limit=100)
                     result = await agent.run(prompt, **run_kw)
                     if attempt_span:
                         attempt_span.set_output(

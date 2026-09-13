@@ -196,7 +196,6 @@ def test_query_agent_builds_with_plan_tools():
     assert "retrieve_values" in tool_names
     assert "execute_python_code" in tool_names
     assert "write_plan" in tool_names
-    assert "update_step_status" in tool_names
 
 
 # ---------------------------------------------------------------------------

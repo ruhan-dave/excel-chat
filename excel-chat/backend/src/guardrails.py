@@ -215,7 +215,7 @@ _SAFETY_PATTERNS: list[tuple[str, str, str]] = [
     ),
     (
         "fraud",
-        r"\b(?:fraud|money\s?launder|insider\s?trading|market\s?manipulation|embezzlement|ponzi|pyramid\s?scheme|wash\s?trading)\b",
+        r"\b(?:fraud|money\s?launder(?:ing)?|insider\s?trading|market\s?manipulation|embezzlement|ponzi|pyramid\s?scheme|wash\s?trading)\b",
         "I cannot assist with requests that appear to involve illegal or fraudulent activity.",
     ),
     (

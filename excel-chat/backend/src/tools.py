@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from statistics import mean, median, stdev
+import statistics
 from typing import Any, Callable
 
 import numpy as np
@@ -62,10 +62,10 @@ def op_min(*args: float) -> float:
     return min(args)
 
 def op_average(*args: float) -> float | None:
-    return mean(args) if args else None
+    return statistics.mean(args) if args else None
 
 def op_median(*args: float) -> float | None:
-    return median(args) if args else None
+    return statistics.median(args) if args else None
 
 def op_yoy_growth(current: float, previous: float) -> float | None:
     return ((current - previous) / previous) * 100 if previous != 0 else None
@@ -85,7 +85,7 @@ def op_difference(a: float, b: float) -> float:
     return abs(a - b)
 
 def op_stdev(*args: float) -> float | None:
-    return stdev(args) if len(args) >= 2 else None
+    return statistics.stdev(args) if len(args) >= 2 else None
 
 NAMED_OPERATIONS: dict[str, Callable[..., Any]] = {
     "add": op_add,
@@ -356,14 +356,21 @@ async def execute_python_code(ctx: RunContext[PipelineDeps], code: str) -> str:
         return margin
         '''
 
+    The sandbox does NOT support `import` statements (import statistics,
+    import numpy, import pandas, etc. will all fail). Use the pre-registered
+    functions instead:
+
     Available in the sandbox:
-    - Basic Python syntax and operators
-    - math module (math.sqrt, math.pow, etc.)
+    - math module (math.sqrt, math.pow, etc.) — already imported, no import needed
     - Common builtins (abs, round, min, max, sum, len, sorted)
     - NumPy functions (np_mean, np_std, np_median, np_percentile, np_diff,
       np_cumsum, np_min, np_max, np_sum, np_var, np_corrcoef, np_percentile,
       np_round, np_sqrt, np_exp, np_log, np_abs, np_arange, np_linspace,
       np_dot, np_argmax, np_argmin)
+    - Statistics functions (stats_mean, stats_stdev, stats_variance,
+      stats_median, stats_median_low, stats_median_high, stats_quantiles,
+      stats_correlation, stats_linear_regression) — use these instead of
+      `import statistics`
     - Pandas functions (pd_series, pd_rolling_mean, pd_rolling_std,
       pd_describe, pd_deduplicate, pd_value_counts, np_histogram)
     """
@@ -444,6 +451,17 @@ pd_deduplicate: Any = None
 pd_value_counts: Any = None
 np_histogram: Any = None
 
+# Statistics functions available in the sandbox
+stats_mean: Any = None
+stats_stdev: Any = None
+stats_variance: Any = None
+stats_median: Any = None
+stats_median_low: Any = None
+stats_median_high: Any = None
+stats_quantiles: Any = None
+stats_correlation: Any = None
+stats_linear_regression: Any = None
+
 # Computed values from the pipeline will be injected
 """
 
@@ -495,6 +513,22 @@ np_histogram: Any = None
             "pd_deduplicate": lambda x: list(pd.Series(x).unique()),
             "pd_value_counts": lambda x: pd.Series(x).value_counts().to_dict(),
             "np_histogram": lambda x, bins=10: {"counts": np.histogram(x, bins=bins)[0].tolist(), "bin_edges": np.histogram(x, bins=bins)[1].tolist()},
+            # Statistics module — stdev, variance, correlation, etc.
+            # (the sandbox blocks `import statistics`; these provide the same
+            #  functions as external callbacks, same pattern as np_* / pd_*)
+            # ddof=1 (sample statistics) is the default to match numpy/std
+            "stats_mean": lambda x: float(statistics.mean(x)),
+            "stats_stdev": lambda x, ddof=1: float(np.std(x, ddof=ddof)),
+            "stats_variance": lambda x, ddof=1: float(np.var(x, ddof=ddof)),
+            "stats_median": lambda x: float(statistics.median(x)),
+            "stats_median_low": lambda x: float(statistics.median_low(x)),
+            "stats_median_high": lambda x: float(statistics.median_high(x)),
+            "stats_quantiles": lambda x, n=4: [float(q) for q in statistics.quantiles(x, n=n)],
+            "stats_correlation": lambda x, y: float(statistics.correlation(x, y)),
+            "stats_linear_regression": lambda x, y: {
+                "slope": float(statistics.linear_regression(x, y).slope),
+                "intercept": float(statistics.linear_regression(x, y).intercept),
+            },
         }
 
         # Create the Monty instance
@@ -545,6 +579,18 @@ np_histogram: Any = None
 
     except Exception as e:
         error = f"ERROR: {type(e).__name__}: {str(e)}"
+        # Augment ModuleNotFoundError with guidance to use pre-registered
+        # functions instead of import statements
+        if "ModuleNotFoundError" in error:
+            error += (
+                "\n\nHINT: The sandbox does not support import statements. "
+                "Use the pre-registered functions instead: "
+                "stats_mean, stats_stdev, stats_variance, stats_median, "
+                "stats_correlation, np_mean, np_std, np_median, np_var, "
+                "np_percentile, np_diff, np_corrcoef. "
+                "These are already available — call them directly without importing. "
+                "(Note: `import math` IS supported, other imports are not.)"
+            )
         ctx.deps.emit("tool_result", {"tool": "execute_python_code", "result": error[:500], "error": True})
         return error
 

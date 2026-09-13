@@ -128,10 +128,21 @@ app.add_middleware(
 
 @app.middleware("http")
 async def langfuse_request_span(request: Request, call_next):
-    """Langfuse trace for every HTTP request."""
+    """Langfuse trace for every HTTP request.
+
+    For query endpoints, the trace name includes the query text so each
+    row in Langfuse is immediately identifiable without clicking in.
+    """
     user_id = request.headers.get("X-User-ID") or "anonymous"
+    # Use query text in trace name for query endpoints — makes each trace
+    # row in Langfuse instantly identifiable.
+    query_text = request.query_params.get("query", "")
+    if query_text and "/query" in request.url.path:
+        trace_name = f"excel-chat:query: {query_text[:80]}"
+    else:
+        trace_name = f"excel-chat:http:{request.method} {request.url.path}"
     with observe_agent_run(
-        name=f"excel-chat:http:{request.method} {request.url.path}",
+        name=trace_name,
         user_id=user_id,
         tags=["excel-chat", "http"],
         metadata={"method": request.method, "path": request.url.path},

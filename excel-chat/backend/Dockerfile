@@ -45,5 +45,6 @@ COPY --from=frontend-build /frontend/dist /app/static
 WORKDIR /app/src
 
 ENV OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+ENV RELEASE=agent-v1
 
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

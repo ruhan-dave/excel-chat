@@ -277,6 +277,32 @@ def _format_calculation_response(query: str, plan: QueryPlan | None, execution: 
     parts: list[str] = []
     if retrieve_descs:
         parts.append(f"Based on: {'; '.join(retrieve_descs)}.")
+
+    # If final_answer is raw JSON (agent forgot to synthesize), try to
+    # extract a human-readable summary from it instead of dumping the dict.
+    final_str = str(final)
+    if final_str.strip().startswith("{") or final_str.strip().startswith("["):
+        try:
+            parsed = json.loads(final_str)
+            if isinstance(parsed, dict):
+                # Look for a "conclusion" or "result" key
+                for key in ("conclusion", "result", "answer", "summary"):
+                    if key in parsed:
+                        parts.append(str(parsed[key]))
+                        # Add supporting numbers
+                        for k, v in parsed.items():
+                            if k != key and isinstance(v, (int, float)):
+                                parts.append(f"({k}: {v})")
+                        return " ".join(parts)
+                # No conclusion key — format key-value pairs
+                kv = [f"{k}: {v}" for k, v in parsed.items()
+                      if isinstance(v, (int, float, str)) and not str(v).startswith("{")]
+                if kv:
+                    parts.append(", ".join(kv))
+                    return " ".join(parts)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     parts.append(f"{terminal_desc.capitalize() if terminal_desc else 'Result'}: {final}")
     return " ".join(parts)
 
@@ -373,9 +399,10 @@ def build_query_pipeline(
         stage_usages: list[Any] = []
 
         with observe_agent_run(
-            name="excel-chat:query",
+            name=f"excel-chat:query: {query[:80]}",
             user_id=user_id,
             tags=["excel-chat", "query"],
+            metadata={"query": query[:500]},
         ) as trace_span:
             deps = PipelineDeps(
                 sheets=sheets,

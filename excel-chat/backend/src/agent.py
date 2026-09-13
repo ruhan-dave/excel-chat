@@ -11,7 +11,7 @@ lives in pipeline.py. Shared models live in models.py.
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Any
 
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.capabilities import Instrumentation, ProcessHistory, Thinking
@@ -485,13 +485,24 @@ def n_steps_label(plan: QueryPlan) -> str:
 
 
 # ============================================================================
-# Dynamic Tool Selection
+# Dynamic Tool Selection + Intent Routing
 # ============================================================================
+# The query is classified into one of four intents BEFORE the agent is
+# configured. This determines tool selection, thinking effort, and request
+# limits — giving each intent a pipeline-like feel instead of a flat loop.
+#
+#   retrieve_numbers   — simple lookups (1 field, 1 year). Lean tools, no
+#                        thinking, 50 request limit.
+#   perform_calculations — math/comparison/trend. Lean tools, no thinking,
+#                        50 request limit.
+#   give_advice        — recommendations, strategy, "what should I do".
+#                        Lean tools + Thinking(effort="medium"), 3 request
+#                        limit to prevent bill spiraling on open-ended
+#                        reasoning loops.
+#   eda                — data quality, distributions, correlations. All 17
+#                        tools, no thinking, 50 request limit.
 
 # Keywords that signal an EDA / data-quality / distribution question.
-# When none of these appear, the agent gets only the 4 core tools
-# (retrieve_values, execute_python_code, write_plan, update_step_status)
-# to reduce context bloat and tool-selection errors on smaller models.
 _EDA_KEYWORDS = (
     "data quality", "missing data", "missing values", "null", "nan",
     "distribution", "distribute", "histogram", "outlier",
@@ -507,16 +518,71 @@ _EDA_KEYWORDS = (
     "skew", "kurtosis", "variance", "quartile", "percentile",
 )
 
+# Keywords that signal an advice / recommendation / strategy question.
+# These need reasoning (Thinking) because the answer requires synthesizing
+# multiple data points into a recommendation — not just computing a number.
+_ADVICE_KEYWORDS = (
+    "should i", "what should", "recommend", "recommendation",
+    "suggest", "suggestion", "advice", "advise",
+    "strategy", "strategic", "improve", "improvement",
+    "how can i", "how should", "what would you",
+    "keep on track", "on track", "stay on track",
+    "optimize", "optimization", "best way",
+    "prioritize", "priority", "focus on",
+    "concern", "concerning", "risk", "risky",
+    "opportunity", "opportunities",
+    "insight", "insights", "takeaway", "takeaways",
+    "what about", "what if",
+)
+
+# Keywords that signal a calculation / comparison / trend question.
+_CALC_KEYWORDS = (
+    "growth", "rate", "ratio", "percent", "average", "compare",
+    "comparison", "difference", "cagr", "trend", "increase",
+    "decrease", "change", "stability", "stable", "highest", "lowest",
+    "maximum", "minimum", "max", "min", "median", "stdev", "fraction",
+    "sum of", "total of", "between", "vs", "versus", "by how much",
+    "how much did", "analyze", "volatile", "volatility",
+)
+
+
+def _classify_intent(query: str) -> str:
+    """Classify query intent before agent configuration.
+
+    Returns one of: "eda", "give_advice", "perform_calculations",
+    "retrieve_numbers".
+
+    Order matters: EDA is checked first (data-quality terms are
+    distinctive), then advice (recommendation terms are distinctive),
+    then calculations (math keywords), then default to retrieve_numbers.
+    """
+    import re
+    q = query.lower()
+
+    # EDA — use word-boundary matching for short keywords like "nan", "null"
+    # to avoid false positives on words like "financial" (contains "nan")
+    for kw in _EDA_KEYWORDS:
+        if len(kw) <= 4:
+            if re.search(rf"\b{re.escape(kw)}\b", q):
+                return "eda"
+        elif kw in q:
+            return "eda"
+
+    # Advice — recommendations, strategy, "what should I do"
+    if any(kw in q for kw in _ADVICE_KEYWORDS):
+        return "give_advice"
+
+    # Calculations — math/comparison/trend keywords
+    if any(kw in q for kw in _CALC_KEYWORDS):
+        return "perform_calculations"
+
+    # Default — simple lookup
+    return "retrieve_numbers"
+
 
 def _is_eda_query(query: str) -> bool:
-    """Heuristic: does this query need EDA tools, or just retrieval + compute?
-
-    Returns True if the query mentions data quality, distributions,
-    correlations, or other exploratory-analysis concepts. Conservative —
-    when in doubt, returns False (financial queries get the lean toolset).
-    """
-    q = query.lower()
-    return any(kw in q for kw in _EDA_KEYWORDS)
+    """Backward-compatible EDA check (delegates to _classify_intent)."""
+    return _classify_intent(query) == "eda"
 
 
 # Context-window management: clear old tool results once the history grows
@@ -567,7 +633,7 @@ def build_query_agent(
                  catalog — malformed plans are rejected before execution).
       2. ACT:    calls ``retrieve_values`` / ``execute_python_code`` / EDA tools.
       3. OBSERVE: tool results return into context; the model reasons between
-                 calls (``Thinking`` capability) and updates step status.
+                 calls and updates step status.
       4. OUTPUT: structured ``ExecutionResult`` (step_results + final_answer +
                  friendly_response) — synthesis is the final structured output.
 
@@ -586,8 +652,10 @@ def build_query_agent(
     all_years = sorted({str(y) for meta in sheet_metas for y in meta.years})
     retrieve_t = Tool(retrieve_values, prepare=_prepare_retrieve_values_tool)
 
-    # ---- Dynamic tool selection ----
-    is_eda = _is_eda_query(query) if query else True  # default: all tools
+    # ---- Dynamic tool selection + intent-based routing ----
+    intent = _classify_intent(query) if query else "eda"  # default: all tools
+    is_eda = intent == "eda"
+    is_advice = intent == "give_advice"
     eda_tools = [
         analyze_sheet,
         find_missing_data,
@@ -611,9 +679,9 @@ def build_query_agent(
     else:
         tools = [retrieve_t, execute_python_code]
         tool_note = "For this query, use retrieve_values and execute_python_code only."
-    # write_plan and update_step_status are registered via @agent.tool below
-    total_tools = len(tools) + 2
-    print(f"🔧 Tools registered: {total_tools} ({'EDA' if is_eda else 'core-only'}) — {tool_note}")
+    # write_plan is registered via @agent.tool below
+    total_tools = len(tools) + 1
+    print(f"🔧 Intent: {intent} | Tools: {total_tools} ({'EDA' if is_eda else 'core-only'}) | Thinking: {'medium' if is_advice else 'off'} — {tool_note}", flush=True)
 
     system_prompt = f"""You are a financial data analysis agent that plans, executes, and answers.
 
@@ -662,22 +730,36 @@ def build_query_agent(
        - For compute steps: call `execute_python_code` with retrieved values as
          literal numbers. Use a `return` statement.
          Example: 'rev = 1500\\nexp = 800\\nreturn (rev - exp) / rev * 100'
-       - Mark each step in-progress/completed with `update_step_status` as you go.
        - For EDA questions (data quality, distributions, correlations), use the
          EDA tools directly instead of writing a step plan. {tool_note}
 
     3. ANSWER — return ExecutionResult with:
        - step_results: EVERY step's result (never an empty dict)
-       - final_answer: the computed/retrieved answer
+       - final_answer: the computed/retrieved answer (a concise string)
        - explanation: how the answer was derived
-       - friendly_response: natural-language answer using ACTUAL field names.
+       - friendly_response: a NATURAL-LANGUAGE sentence using ACTUAL field
+         names. This is what the user sees — write it as if explaining to a
+         colleague, NOT as raw data.
+         WRONG: {{"cv_wages": 0.078, "conclusion": "more stable"}}
          WRONG: "The first series grew at 25.4%".
-         RIGHT: "Social security benefits grew at a CAGR of 25.4%".
+         RIGHT: "Employers' social contributions were more stable than wages
+         and salaries (coefficient of variation: 0.077 vs 0.079). The
+         difference is negligible at 0.002."
+         NEVER put raw JSON, a dict, or a compute result directly into
+         friendly_response. Always synthesize into plain English.
        When retrieve returns multiple sheet values, format is "SheetName: value; ...".
        If a retrieval fails, note it and continue with what you have.
 
     {GUARDRAIL_SYSTEM_PROMPT}
     """
+
+    # ---- Capabilities: advice gets Thinking, others don't ----
+    capabilities: list[Any] = [
+        Instrumentation(),        # Langfuse OTel tracing
+        ProcessHistory(clear_old_tool_results),  # context-window management
+    ]
+    if is_advice:
+        capabilities.insert(0, Thinking(effort="medium"))
 
     agent = Agent(
         model,
@@ -687,11 +769,7 @@ def build_query_agent(
         tools=tools,
         model_settings={"temperature": 0.1},
         retries=2,
-        capabilities=[
-            Thinking(effort="medium"),   # reasoning between tool calls (OpenRouter: reasoning={'effort': ...})
-            Instrumentation(),        # Langfuse OTel tracing
-            ProcessHistory(clear_old_tool_results),  # context-window management
-        ],
+        capabilities=capabilities,
     )
 
     # ---- Plan tools: code-enforced planning (schema + semantic validation) ----
@@ -747,22 +825,6 @@ def build_query_agent(
         print(f"📋 Plan accepted ({plan.task_type}, {n_steps_label(plan)}):",
               json.dumps(plan.model_dump(), indent=2, default=str))
         return f"Plan accepted ({n_steps_label(plan)}). Execute each step now, then return the final answer."
-
-    @agent.tool
-    async def update_step_status(
-        ctx: RunContext[PipelineDeps],
-        step_id: str,
-        status: Literal["in_progress", "completed"],
-    ) -> str:
-        """Mark a plan step as in_progress or completed.
-
-        Args:
-            step_id: The step identifier from the plan (e.g. "step1", "step2").
-            status: Either "in_progress" (when starting the step) or
-                "completed" (when the step's result is ready).
-        """
-        ctx.deps.emit("step_started" if status == "in_progress" else "step_completed", {"step_id": step_id})
-        return f"Step {step_id} marked {status}."
 
     # Bridge plan/step events into the SSE queue via deps (tools emit through
     # ctx.deps.emit — see PipelineDeps.emit).

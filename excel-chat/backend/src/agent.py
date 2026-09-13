@@ -643,6 +643,13 @@ def build_query_agent(
              that named ops can't express.
            Each step needs a short `description` for the UI, e.g.
            "Retrieving social security benefits 2017-2021".
+       - TREND / ALL-YEARS queries ("across all years", "over time", "trend"):
+         use this exact 2-step structure — NOT one step per year:
+           step1: retrieve ["FieldName", <every year listed in the catalog>]
+           step2: compute "<per-year calculation, e.g. margin = (revenue-expense)/revenue>"
+         Then execute with ONE retrieve_values call (all years batched) and ONE
+         execute_python_code call (loop over the years dict). Two tool calls
+         total — never one retrieve per year.
        - For retrieve_numbers: items = ["FieldName, Year", ...]
        - The plan is VALIDATED: unknown fields/years, unknown actions, or
          forward step references are REJECTED — you will be asked to fix them.

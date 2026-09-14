@@ -674,11 +674,15 @@ def build_query_agent(
         get_sheet_dtypes,
     ]
     if is_eda:
+        # EDA queries use EDA tools directly (no plan needed)
         tools = [retrieve_t, execute_python_code] + eda_tools
         tool_note = "You have EDA tools available for data quality, distributions, and correlations."
     else:
-        tools = [retrieve_t, execute_python_code]
-        tool_note = "For this query, use retrieve_values and execute_python_code only."
+        # Calculation/retrieval queries: ONLY write_plan (registered below).
+        # The deterministic executor in write_plan handles retrieve/compute.
+        # execute_python_code is kept for COMPUTE_NEEDED fallback.
+        tools = [execute_python_code]
+        tool_note = "Use write_plan to plan and execute. Results come back in the tool response."
     # write_plan is registered via @agent.tool below
     total_tools = len(tools) + 1
     print(f"🔧 Intent: {intent} | Tools: {total_tools} ({'EDA' if is_eda else 'core-only'}) | Thinking: {'medium' if is_advice else 'off'} — {tool_note}", flush=True)
@@ -694,7 +698,7 @@ def build_query_agent(
 
     ## Workflow (follow this order):
 
-    1. PLAN FIRST — call `write_plan` with a structured QueryPlan:
+    1. PLAN — call `write_plan` with a structured QueryPlan:
        - task_type: "retrieve_numbers" (simple lookups), "perform_calculations"
          (any math/comparison), "give_advice" (recommendations), or "other".
        - For perform_calculations: numbered steps using these actions:
@@ -707,29 +711,28 @@ def build_query_agent(
                yoy_growth, ratio, percentage_change, difference
              Ternary (3 args): cagr [end_value, start_value, num_years]
              N-ary (2+ args): add, multiply, max, min, average, median, stdev
-           * compute — natural-language description for complex multi-step math
-             that named ops can't express.
-           Each step needs a short `description` for the UI, e.g.
+           * compute — for complex calculations that named ops can't express.
+             Put the actual Python code in the `description` field (must contain
+             a `return` statement). Retrieved values from prior steps are
+             available as variables named step1, step2, etc.
+           Use step1, step2, step3 as keys (NOT "steps"). Each step needs a
+           short `description` for the UI, e.g.
            "Retrieving social security benefits 2017-2021".
        - TREND / ALL-YEARS queries ("across all years", "over time", "trend"):
          use this exact 2-step structure — NOT one step per year:
            step1: retrieve ["FieldName", <every year listed in the catalog>]
            step2: compute "<per-year calculation, e.g. margin = (revenue-expense)/revenue>"
-         Then execute with ONE retrieve_values call (all years batched) and ONE
-         execute_python_code call (loop over the years dict). Two tool calls
-         total — never one retrieve per year.
        - For retrieve_numbers: items = ["FieldName, Year", ...]
        - The plan is VALIDATED: unknown fields/years, unknown actions, or
          forward step references are REJECTED — you will be asked to fix them.
          Use exact names from the catalog to avoid rejection.
 
-    2. EXECUTE the plan step by step:
-       - Call `retrieve_values` for each retrieve step (batch years per field
-         in ONE call — prefer retrieve_values over repeated single-year calls).
-       - For named ops: compute directly or via `execute_python_code`.
-       - For compute steps: call `execute_python_code` with retrieved values as
-         literal numbers. Use a `return` statement.
-         Example: 'rev = 1500\\nexp = 800\\nreturn (rev - exp) / rev * 100'
+    2. RESULTS — when write_plan returns, ALL retrieve and named-op steps
+       have been executed automatically. The results are in the tool response.
+       IMPORTANT: Do NOT call retrieve_values or execute_python_code again —
+       the data is already in the write_plan results. Use those results
+       directly to produce your ExecutionResult in step 3.
+       Only call execute_python_code if a step is marked "COMPUTE_NEEDED".
        - For EDA questions (data quality, distributions, correlations), use the
          EDA tools directly instead of writing a step plan. {tool_note}
 
@@ -776,12 +779,17 @@ def build_query_agent(
 
     @agent.tool
     async def write_plan(ctx: RunContext[PipelineDeps], plan: QueryPlan) -> str:
-        """Write the execution plan before acting on the query.
+        """Write the execution plan. The plan is then executed deterministically
+        (no model calls needed for retrieval/calculation).
 
-        The plan is validated twice: the Pydantic schema (allowed actions, arg
-        shapes) is enforced automatically, and field names / years / step
-        references are checked against the sheet catalog. Fix any reported
-        errors and call write_plan again until it is accepted.
+        The plan is validated: field names / years / step references are checked
+        against the sheet catalog. Fix any reported errors and call write_plan
+        again until it is accepted.
+
+        After acceptance, ALL retrieve and named-op steps are executed
+        automatically. The results are returned to you in this tool response.
+        You only need to call execute_python_code if a compute step requires
+        custom code, then produce the final ExecutionResult.
 
         Args:
             plan: A structured QueryPlan with task_type, plan steps (for
@@ -815,6 +823,8 @@ def build_query_agent(
                 "PLAN REJECTED — fix these and call write_plan again:\n"
                 + "\n".join(f"- {e}" for e in errors)
             )
+
+        # Plan accepted — store and emit
         ctx.deps.plan = plan
         ctx.deps.emit("plan", {
             "task_type": plan.task_type,
@@ -824,7 +834,15 @@ def build_query_agent(
         })
         print(f"📋 Plan accepted ({plan.task_type}, {n_steps_label(plan)}):",
               json.dumps(plan.model_dump(), indent=2, default=str))
-        return f"Plan accepted ({n_steps_label(plan)}). Execute each step now, then return the final answer."
+
+        # ---- Deterministic execution (no model in the loop) ----
+        # Execute all retrieve and named-op steps as plain Python calls.
+        # Compute steps that need custom code are marked COMPUTE_NEEDED.
+        from plan_executor import execute_plan, format_results_for_model
+        step_results = await execute_plan(plan, ctx)
+        results_text = format_results_for_model(step_results)
+        print(f"⚡ Plan executed deterministically: {len(step_results)} steps")
+        return results_text
 
     # Bridge plan/step events into the SSE queue via deps (tools emit through
     # ctx.deps.emit — see PipelineDeps.emit).

@@ -866,21 +866,31 @@ async def query_stream(
             # Run pipeline in background, consume events from queue concurrently
             pipeline_task = asyncio.create_task(pipeline(query))
 
-            while True:
-                # Check if pipeline is done and queue is empty
-                if pipeline_task.done() and event_queue.empty():
-                    break
+            try:
+                while True:
+                    # Check if pipeline is done and queue is empty
+                    if pipeline_task.done() and event_queue.empty():
+                        break
 
-                try:
-                    event_type, payload = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    try:
+                        event_type, payload = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                        yield f"event: {event_type}\ndata: {payload}\n\n"
+                    except asyncio.TimeoutError:
+                        continue
+
+                # Drain any remaining events
+                while not event_queue.empty():
+                    event_type, payload = await event_queue.get()
                     yield f"event: {event_type}\ndata: {payload}\n\n"
-                except asyncio.TimeoutError:
-                    continue
-
-            # Drain any remaining events
-            while not event_queue.empty():
-                event_type, payload = await event_queue.get()
-                yield f"event: {event_type}\ndata: {payload}\n\n"
+            except asyncio.CancelledError:
+                # Client disconnected (stop button) — cancel the pipeline
+                pipeline_task.cancel()
+                try:
+                    await pipeline_task
+                except asyncio.CancelledError:
+                    pass
+                yield f"event: cancelled\ndata: {{\"message\": \"Request cancelled by user.\"}}\n\n"
+                return
 
             # Get the result and write to cache
             result = await pipeline_task

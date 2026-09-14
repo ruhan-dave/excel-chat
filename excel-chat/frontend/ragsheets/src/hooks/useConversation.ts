@@ -20,6 +20,8 @@ export interface StreamingState {
     friendlyResponse: string;
     isCached: boolean;
     cacheType: string | null;
+    plotImage: string | null;
+    plotTitle: string;
 }
 
 const initialStreamingState: StreamingState = {
@@ -30,6 +32,8 @@ const initialStreamingState: StreamingState = {
     friendlyResponse: "",
     isCached: false,
     cacheType: null,
+    plotImage: null,
+    plotTitle: "",
 };
 
 export function useConversation(
@@ -151,6 +155,16 @@ export function useConversation(
             es.addEventListener("friendly", (e: MessageEvent) => {
                 const data = JSON.parse(e.data);
                 setStreaming((prev) => ({ ...prev, friendlyResponse: data.response || "" }));
+            });
+
+            es.addEventListener("plot", (e: MessageEvent) => {
+                const data = JSON.parse(e.data);
+                setStreaming((prev) => ({
+                    ...prev,
+                    plotImage: data.image || null,
+                    plotTitle: data.title || "",
+                }));
+                addStep("Plot Generated", data.plot_type || "plot");
             });
 
             es.addEventListener("cached", (e: MessageEvent) => {

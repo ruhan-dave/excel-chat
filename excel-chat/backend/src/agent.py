@@ -38,6 +38,7 @@ from tools import (
     value_counts_analysis,
     deduplicate_rows,
     get_sheet_dtypes,
+    generate_plot,
     _prepare_retrieve_values_tool,
 )
 from observability import init_observability
@@ -516,6 +517,9 @@ _EDA_KEYWORDS = (
     "explore", "eda", "exploratory",
     "clean", "cleaning", "preprocess",
     "skew", "kurtosis", "variance", "quartile", "percentile",
+    "plot", "graph", "chart", "visualize", "visualization",
+    "bar chart", "line chart", "scatter", "pie chart",
+    "show me", "display",
 )
 
 # Keywords that signal an advice / recommendation / strategy question.
@@ -672,6 +676,7 @@ def build_query_agent(
         value_counts_analysis,
         deduplicate_rows,
         get_sheet_dtypes,
+        generate_plot,
     ]
     if is_eda:
         # EDA queries use EDA tools directly (no plan needed)

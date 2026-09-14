@@ -1091,3 +1091,126 @@ async def _prepare_retrieve_values_tool(
             f"If omitted, searches all sheets."
         )
     return tool_def
+
+
+# ============================================================================
+# Plotting tool — generates seaborn plots as base64 PNG
+# ============================================================================
+
+def generate_plot(
+    ctx: RunContext[PipelineDeps],
+    plot_type: str,
+    fields: list[str],
+    years: list[str] | None = None,
+    title: str = "",
+    sheet: str = "",
+) -> str:
+    """Generate a seaborn plot and return it as base64 PNG.
+
+    Args:
+        plot_type: One of: "bar", "line", "hist", "box", "scatter", "heatmap".
+        fields: Field names to plot. For bar/line: 1+ fields across years.
+               For scatter: 2 fields (x, y). For hist/box: 1+ fields.
+               For heatmap: 2+ fields for correlation matrix.
+        years: Years to include. If omitted, uses all years in the sheet.
+        title: Optional plot title.
+        sheet: Optional sheet name. If omitted, searches all sheets.
+
+    Returns:
+        "PLOT:<base64_png>" on success, or "ERROR: ..." on failure.
+    """
+    import io
+    import base64
+
+    ctx.deps.emit("tool_call", {"tool": "generate_plot", "args": {"plot_type": plot_type, "fields": fields, "years": years, "title": title}})
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # non-interactive backend
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+    except ImportError:
+        return "ERROR: matplotlib/seaborn not installed"
+
+    df = _get_sheet_df(ctx, sheet)
+    if df is None:
+        return f"ERROR: Sheet '{sheet}' not found. Available: {list(ctx.deps.sheets.keys())}"
+
+    # The DataFrame is indexed by field name, columns are years
+    # Select requested fields and years
+    available_fields = [str(f) for f in df.index]
+    available_years = [str(c) for c in df.columns]
+
+    selected_fields = [f for f in fields if f in available_fields]
+    if not selected_fields:
+        return f"ERROR: None of the fields {fields} found. Available: {available_fields[:20]}"
+
+    if years:
+        selected_years = [y for y in years if y in available_years]
+    else:
+        selected_years = available_years
+
+    if not selected_years:
+        return f"ERROR: None of the years {years} found. Available: {available_years}"
+
+    # Subset the DataFrame
+    subset = df.loc[selected_fields, selected_years].copy()
+
+    try:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        if plot_type == "bar":
+            subset.T.plot(kind="bar", ax=ax)
+            ax.set_xlabel("Year")
+            ax.set_ylabel("Value")
+        elif plot_type == "line":
+            subset.T.plot(kind="line", marker="o", ax=ax)
+            ax.set_xlabel("Year")
+            ax.set_ylabel("Value")
+        elif plot_type == "hist":
+            # Histogram of values across all years for each field
+            data = subset.values.flatten()
+            sns.histplot(data, kde=True, ax=ax)
+            ax.set_xlabel("Value")
+            ax.set_ylabel("Frequency")
+        elif plot_type == "box":
+            subset.T.plot(kind="box", ax=ax)
+            ax.set_xlabel("Field")
+            ax.set_ylabel("Value")
+        elif plot_type == "scatter":
+            if len(selected_fields) < 2:
+                return "ERROR: scatter plot requires 2 fields (x, y)"
+            x_vals = subset.loc[selected_fields[0]].values
+            y_vals = subset.loc[selected_fields[1]].values
+            sns.scatterplot(x=x_vals, y=y_vals, ax=ax)
+            ax.set_xlabel(selected_fields[0])
+            ax.set_ylabel(selected_fields[1])
+        elif plot_type == "heatmap":
+            # Correlation heatmap of selected fields across years
+            corr = subset.T.corr()
+            sns.heatmap(corr, annot=True, cmap="coolwarm", center=0, ax=ax)
+        else:
+            return f"ERROR: Unknown plot type '{plot_type}'. Use: bar, line, hist, box, scatter, heatmap"
+
+        if title:
+            ax.set_title(title)
+        else:
+            ax.set_title(f"{plot_type.capitalize()} plot: {', '.join(selected_fields)}")
+
+        plt.tight_layout()
+
+        # Save as base64 PNG
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        img_b64 = base64.b64encode(buf.read()).decode("utf-8")
+
+        ctx.deps.emit("tool_result", {"tool": "generate_plot", "result": f"plot ({plot_type}, {len(selected_fields)} fields, {len(selected_years)} years)"})
+        ctx.deps.emit("plot", {"image": img_b64, "plot_type": plot_type, "title": title or f"{plot_type.capitalize()} plot"})
+
+        return f"PLOT: generated {plot_type} plot with {len(selected_fields)} fields across {len(selected_years)} years"
+
+    except Exception as exc:
+        plt.close("all")
+        return f"ERROR generating plot: {type(exc).__name__}: {exc}"

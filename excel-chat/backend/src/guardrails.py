@@ -167,12 +167,12 @@ def validate_file_upload(
 # ---------------------------------------------------------------------------
 
 _SUMMARY_PATTERNS = [
-    r"\bsummar(?:y|ize|ise|ised|izing|isation)\b",
+    r"\bsummar(?:y|ize|ise|ised|izing|isation)\b(?!\s+(?:stat|of\s+(?:the\s+)?(?:key|main|major|top|expense|revenue|cost|income|profit|loss|balance|asset|liabilit|financial)))",
     r"\bgive me a summary\b",
     r"\b\d+[- ]page (?:summary|report)\b",
     r"\bfull report\b",
     r"\bdetailed analysis\b",
-    r"\bexecutive summary\b",
+    r"\bexecutive summary\b(?!\s+of\s+(?:the\s+)?\w)",
     r"\bbreakdown of (?:the )?(?:entire|whole) document\b",
     r"\bwrite (?:a|me) (?:report|summary)\b",
     r"\bcondensed version\b",
@@ -205,12 +205,12 @@ _SAFETY_PATTERNS: list[tuple[str, str, str]] = [
     # (category, reason, rejection_message)
     (
         "credential_theft",
-        r"\b(?:password|passwd|secret\s?key|api\s?key|auth(?:oriz|oris)?ation\s?code|access\s?token|bearer\s?token)\b",
+        r"\b(?:password|passwd|secret\s?key|api\s?key|auth(?:oriz|oris)?ation\s?code|access\s?token|bearer\s?token|connection\s?string(?!\s+between))\b",
         "I cannot assist with requests involving credentials, access codes, or unauthorized access.",
     ),
     (
         "hacking",
-        r"\b(?:hack|exploit|vulnerability|bypass\s?security|sql\s?injection|xss|cross[- ]site scripting|reverse\s?shell|privilege\s?escalation)\b",
+        r"\b(?:hack|exploit|vulnerability|bypass\s?(?:security|validation\s?checks|auth)|sql\s?injection|xss|cross[- ]site scripting|reverse\s?shell|privilege\s?escalation|os\.system|subprocess|eval\s*\(|exec\s*\(|rm\s+-rf)\b",
         "I cannot assist with requests involving hacking, exploitation, or unauthorized system access.",
     ),
     (
@@ -220,13 +220,18 @@ _SAFETY_PATTERNS: list[tuple[str, str, str]] = [
     ),
     (
         "social_engineering",
-        r"\b(?:i am (?:an? )?(?:administrator|admin|engineer|developer|root)|act as (?:an? )?(?:administrator|admin|engineer|developer|root)|pretend (?:i am|to be) (?:an? )?(?:administrator|admin|engineer))\b",
+        r"\b(?:i am (?:an? )?(?:administrator|admin|engineer|developer|root)|act as (?:an? )?(?:administrator|admin|engineer|developer|root)|pretend (?:i am|to be) (?:an? )?(?:administrator|admin|engineer)|operating in (?:admin|root|developer|elevated) mode|elevated\s?privileges?)\b",
         "I cannot fulfill role-based or privileged access requests.",
     ),
     (
         "prompt_injection",
-        r"\b(?:ignore (?:previous|all|your) instructions?|disregard (?:previous|your) (?:instructions|rules|guidelines)|act as (?:developer|jailbreak|dan) mode|output (?:your )?system (?:prompt|instructions)|reveal (?:your )?(?:system )?prompt|you are now (?:free|unrestricted|jailbroken))\b",
+        r"\b(?:ignore (?:all\s+)?(?:previous|all|your)\s+instructions?|disregard (?:previous|your) (?:instructions|rules|guidelines)|act as (?:developer|jailbreak|dan) mode|you are now (?:dan|free|unrestricted|jailbroken)|(?:output|reveal|repeat|show)\s+(?:your\s+)?(?:system\s+)?(?:prompt|instructions)|from now on(?:,|:) whenever)\b",
         "I cannot process requests that attempt to override my guidelines.",
+    ),
+    (
+        "data_exfiltration",
+        r"\b(?:send (?:it|data|file|all|the\s+raw)\s+to\s+https?://|exfiltrat|upload (?:all|the)\s+(?:data|sheet|table)\s+to\s+(?:a\s+)?(?:url|server|endpoint))\b",
+        "I cannot assist with requests that attempt to exfiltrate data to external locations.",
     ),
 ]
 

@@ -42,6 +42,7 @@ function App() {
         streaming,
         error,
         sendMessage,
+        cancelStreaming,
     } = useConversation(activeThreadId, threadSheets, refetchThreads);
 
     // Load thread sheets when active thread changes
@@ -189,6 +190,7 @@ function App() {
                             onAddSheet={handleAddSheet}
                             onRemoveSheet={handleRemoveSheet}
                             onSendMessage={handleSendMessage}
+                            onCancelStreaming={cancelStreaming}
                             query={query}
                             onQueryChange={setQuery}
                         />

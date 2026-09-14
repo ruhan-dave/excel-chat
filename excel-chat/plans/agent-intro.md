@@ -53,11 +53,15 @@ Everything data-specific is injected at build time into the system prompt:
 DataFrames, SSE callback, sheet metadata, the accepted plan, and user_id. Tools
 access everything through `ctx.deps` — nothing data-specific is baked in.
 
-**Dynamic tool selection** (`_is_eda_query`): keyword scan on the query.
-- EDA queries → 17 EDA tools + 2 core + 2 plan tools = 21 total
-- Financial queries → `retrieve_values` + `execute_python_code` + 2 plan tools = 6 total
+**Dynamic tool selection** (`_classify_intent`): keyword scan on the query.
+- EDA queries → 15 EDA tools + `retrieve_values` + `execute_python_code` = 17 total
+- Calculation/retrieval queries → `write_plan` + `execute_python_code` = 2 tools
+  (`retrieve_values` is NOT available to the model — the deterministic
+  executor inside `write_plan` handles retrieval)
+- Advice queries → `write_plan` + `execute_python_code` + `Thinking(effort="medium")`
 
-Cuts ~2-3k tokens of tool definitions for the common case.
+Cuts ~2-3k tokens of tool definitions for the common case and eliminates
+the model-call-per-tool loop (see Deterministic Execution below).
 
 ## System Prompt (three sections)
 
@@ -65,13 +69,57 @@ Cuts ~2-3k tokens of tool definitions for the common case.
    Cross-sheet note: sheets sharing a schema group can be compared; omit sheet name
    to search the group.
 2. **Workflow** — the 3-phase contract:
-   - **PLAN FIRST**: call `write_plan` with a `QueryPlan`. Plan is validated and
-     will be rejected if fields/years/actions/refs are wrong.
-   - **EXECUTE**: batch years per retrieve call, use `execute_python_code` for math,
-     mark steps with `update_step_status`.
-   - **ANSWER**: return `ExecutionResult` with every step's result, real field names
-     in `friendly_response`, explicit note if retrieval fails.
+   - **PLAN**: call `write_plan` with a `QueryPlan`. Plan is validated and
+     will be rejected if fields/years/actions/refs are wrong. On acceptance,
+     ALL retrieve and named-op steps are executed **deterministically** (no
+     model calls) — results are returned to the model in the tool response.
+   - **RESULTS**: the model reads the results from `write_plan` and produces
+     `ExecutionResult`. Only call `execute_python_code` if a step is marked
+     `COMPUTE_NEEDED`.
+   - **ANSWER**: return `ExecutionResult` with every step's result, real field
+     names in `friendly_response`, explicit note if retrieval fails.
 3. **Guardrails** — `GUARDRAIL_SYSTEM_PROMPT` (financial-advice disclaimer policy).
+
+---
+
+## Deterministic Execution (`plan_executor.py`)
+
+After `write_plan` accepts a plan, the deterministic executor runs ALL retrieve
+and named-op steps as plain Python function calls — **no model in the loop**.
+This turns a 10+ model-call query into 2 calls:
+
+```
+Call 1: model calls write_plan → deterministic executor runs all steps → results
+        returned to the model in the tool response
+Call 2: model sees all results, produces ExecutionResult + friendly_response
+```
+
+### What the executor handles
+
+| Step action | How it's executed |
+|-------------|-------------------|
+| `retrieve` | Calls `retrieve_values(ctx, field, years, sheet)` directly |
+| Named ops (add, subtract, ratio, cagr, etc.) | Applies the operation to prior step results or literals |
+| `compute` | If the `description` field contains Python code with a `return` statement, runs it via `execute_python_code`. Otherwise marks the step `COMPUTE_NEEDED` — the model must call `execute_python_code` for that step. |
+
+### Sheet-name detection
+
+The executor checks if `args[0]` is an actual sheet name (from
+`ctx.deps.sheet_metas`) before treating it as a field name. This prevents
+"Current" (a field) from being misdetected as a sheet name.
+
+### Named ops
+
+All 23 named operations are implemented as pure Python lambdas in
+`_NAMED_OPS`. Args are resolved: step references (`"step1"`) look up
+`step_results["step1"]`; everything else is treated as a literal number.
+
+### Performance impact
+
+| Query | Before (model-per-tool) | After (deterministic) |
+|-------|------------------------|------------------------|
+| Ratio (current/capital 2019) | 42s, 10+ model calls | 18.8s, 2 model calls |
+| Percentage (wages/expense 2015) | 49s, 10+ model calls | 9s, 2 model calls |
 
 ---
 
@@ -276,8 +324,11 @@ is accepted.
 On acceptance:
 - Plan stored in `ctx.deps.plan`.
 - `plan` SSE event emitted (UI shows the plan card).
-- Acceptance message returned: `"Plan accepted (5 steps). Execute each step now,
-  then return the final answer."`
+- **Deterministic executor runs ALL retrieve and named-op steps** as plain
+  Python function calls (0 model calls). Results are returned to the model
+  in the tool response: `"PLAN EXECUTED. Here are ALL the results: step1=...,
+  step2=..., ..."`. The model does NOT call `retrieve_values` — it reads the
+  results and produces `ExecutionResult`.
 
 ---
 
@@ -490,30 +541,75 @@ errors so a broken SSE connection cannot crash the agent.
 | `error` | Any failure | `{"message": "..."}` |
 | `done` | Pipeline complete | `{"message": "done"}` |
 
-### Typical event timeline (from benchmark test)
+### Typical event timeline (deterministic executor)
 
 ```
-[  0.00s] status          "Analyzing your question…"
-[  4.44s] plan            Plan accepted (5 steps)
-[  6.17s] step_started    step1
-[  6.17s] tool_call       retrieve_values "Social security benefits"
-[  6.17s] tool_result     {"2018": 332.27, "2023": 659.68}
-[  8.37s] step_completed  step1
-[  8.37s] step_started    step2
-[  8.37s] tool_call       retrieve_values "Social assistance benefits"
-[  8.37s] tool_result     {"2018": 4492.43, "2023": 13140.36}
-[ 10.35s] step_completed  step2
-[ 14.51s] tool_call       execute_python_code (CAGR calc)
-[ 14.83s] tool_result     14.70%
-[ 17.70s] step_completed  step3, step4, step5
-[ 33.54s] execution       final structured result
-[ 33.66s] friendly        friendly_response
+Query: "What was the ratio of current to capital expenses in 2019"
+Total time: 18.8s | agent_run: 18.1s | Model calls: 2
+
+┌─ event: status    "Loading sheets from storage…"
+│  pipeline.py:418 — _try_deterministic_lookup() didn't match (not a simple "X in Y" query)
+│
+┌─ event: status    "Analyzing your question…"
+│  pipeline.py:473 — entering agent run
+│
+│  ╔═══════════════════════════════════════════════════════════╗
+│  ║ MODEL CALL 1: model calls write_plan(QueryPlan)          ║
+│  ║                                                           ║
+│  ║ Plan:                                                     ║
+│  ║   step1: retrieve ["Current", "2019"]                     ║
+│  ║   step2: retrieve ["Capital", "2019"]                     ║
+│  ║   step3: ratio ["step1", "step2"]                        ║
+│  ╚═══════════════════════════════════════════════════════════╝
+│
+┌─ event: plan      (the accepted plan)
+│  agent.py:822 — plan validated, emit to frontend
+│
+│  ╔═══════════════════════════════════════════════════════════╗
+│  ║ DETERMINISTIC EXECUTION (0 model calls)                  ║
+│  ║ plan_executor.py:execute_plan()                           ║
+│  ║                                                           ║
+│  ║ step1: retrieve_values("Current", ["2019"])               ║
+│  ║   → 107419.16                                            ║
+│  ║ step2: retrieve_values("Capital", ["2019"])               ║
+│  ║   → 7225.45                                              ║
+│  ║ step3: ratio(107419.16, 7225.45)                         ║
+│  ║   → 14.87                                                ║
+│  ╚═══════════════════════════════════════════════════════════╝
+│
+┌─ event: tool_call   retrieve_values("Current", ["2019"])
+┌─ event: tool_result  → "Sheet1: 107419.16"
+│  (emitted by retrieve_values itself)
+│
+┌─ event: tool_call   retrieve_values("Capital", ["2019"])
+┌─ event: tool_result  → "Sheet1: 7225.45"
+│  (emitted by retrieve_values itself)
+│
+┌─ event: tool_result  ratio step3 → "14.866..."
+│  (emitted by plan_executor — named ops don't emit internally)
+│
+│  ╔═══════════════════════════════════════════════════════════╗
+│  ║ MODEL CALL 2: model sees results, produces ExecutionResult ║
+│  ║                                                           ║
+│  ║ step_results: {step1: 107419.16, step2: 7225.45,         ║
+│  ║                step3: 14.87}                             ║
+│  ║ final_answer: "14.87"                                    ║
+│  ║ friendly_response: "In 2019, current expenses were..."  ║
+│  ╚═══════════════════════════════════════════════════════════╝
+│
+┌─ event: execution  (ExecutionResult)
+│  pipeline.py:554 — emit step_results + final_answer + explanation
+│
+┌─ event: friendly   "In 2019, current expenses were about 14.87 times..."
+│  pipeline.py:567 — inject_disclaimer, emit friendly response
+│
+┌─ event: done       {"timings": {"agent_run": 18.1s}, "total": 18.1s}
+│  pipeline.py:597 — return result dict
 ```
 
-12 of 17 events arrive before the midpoint — the user sees the plan card at
-~4s, step-by-step progress from ~6s onward, and tool results as they happen.
-The only wait at the end is the final synthesis (model generating
-`ExecutionResult` + `friendly_response`).
+2 model calls (plan + synthesize), 3 deterministic steps (2 retrieve + 1
+ratio), 18.8s total. Before the deterministic executor, this same query
+took 42s with 10+ model calls.
 
 ---
 
@@ -547,17 +643,18 @@ user query
   → semantic cache ────hit──→ SSE "cached" → done
   → deterministic lookup ─hit─→ direct answer (0 LLM)
   → SSE "status" → agent built (tools selected for THIS query)
-  → [model request ← ProcessHistory trims old tool results]
-  → write_plan ──✗──→ "PLAN REJECTED: ..." → model revises → write_plan ✓
+  → [model call 1] write_plan ──✗──→ "PLAN REJECTED: ..." → model revises → write_plan ✓
     → SSE "plan" (UI shows plan card)
-  → retrieve_values / execute_python_code
-    → SSE "step_started" → "tool_call" → "tool_result" → "step_completed"
-  → structured ExecutionResult
+    → deterministic executor runs ALL retrieve + named-op steps (0 model calls)
+    → results returned to model in tool response
+  → [model call 2] model produces ExecutionResult from results
   → validate_execution_result ──✗──→ "OUTPUT REJECTED: ..." → retry (≤2)
   → SSE "execution" → friendly_response (+ disclaimer) → SSE "friendly" → "done"
   → Langfuse trace with tokens/cost/latency per stage
 ```
 
-One agent. Three code-enforced gates (schema, plan semantics, output semantics).
-The model only ever sees minimal, actionable correction feedback at each gate.
-The user sees incremental progress via SSE throughout — never waiting blind.
+2 model calls in the happy path (plan + synthesize). All retrieval and
+computation is deterministic. One agent. Three code-enforced gates (schema,
+plan semantics, output semantics). The model only ever sees minimal,
+actionable correction feedback at each gate. The user sees incremental
+progress via SSE throughout — never waiting blind.

@@ -10,6 +10,8 @@ import {
     CheckCircle2,
     Sparkles,
     MessageSquareText,
+    Square,
+    BarChart3,
 } from "lucide-react";
 import type { SheetInfo, MessageInfo } from "@/lib/api";
 import type { StreamingState, StreamStep } from "@/hooks/useConversation";
@@ -25,6 +27,7 @@ interface ThreadViewProps {
     onAddSheet: (sheetId: string) => void;
     onRemoveSheet: (sheetId: string) => void;
     onSendMessage: (query: string) => void;
+    onCancelStreaming: () => void;
     query: string;
     onQueryChange: (query: string) => void;
 }
@@ -40,6 +43,7 @@ export function ThreadView({
     onAddSheet,
     onRemoveSheet,
     onSendMessage,
+    onCancelStreaming,
     query,
     onQueryChange,
 }: ThreadViewProps) {
@@ -84,6 +88,27 @@ export function ThreadView({
             );
         }
 
+        let plotBlock = null;
+        if (streaming.plotImage) {
+            plotBlock = (
+                <div className="flex justify-start">
+                    <div className="max-w-[85%] rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                        <div className="flex items-center gap-2 border-b border-slate-200 pb-1.5 mb-2">
+                            <BarChart3 className="h-4 w-4 text-slate-600" />
+                            <h3 className="text-sm font-semibold text-slate-700">
+                                {streaming.plotTitle || "Plot"}
+                            </h3>
+                        </div>
+                        <img
+                            src={`data:image/png;base64,${streaming.plotImage}`}
+                            alt={streaming.plotTitle || "Generated plot"}
+                            className="max-w-full rounded"
+                        />
+                    </div>
+                </div>
+            );
+        }
+
         let friendlyBlock = null;
         if (streaming.friendlyResponse) {
             friendlyBlock = (
@@ -120,6 +145,7 @@ export function ThreadView({
             <div className="flex flex-col gap-3">
                 {statusBlock}
                 {stepsBlock}
+                {plotBlock}
                 {friendlyBlock}
             </div>
         );
@@ -195,17 +221,23 @@ export function ThreadView({
                             }
                         }}
                     />
-                    <Button
-                        onClick={() => onSendMessage(query)}
-                        disabled={!query.trim() || !hasSheets || isLoading}
-                        className="h-[80px] shrink-0"
-                    >
-                        {isLoading ? (
-                            <Loader2 className="h-5 w-5 animate-spin" />
-                        ) : (
+                    {isLoading ? (
+                        <button
+                            onClick={onCancelStreaming}
+                            title="Stop"
+                            className="flex h-[80px] w-[80px] shrink-0 items-center justify-center rounded-full bg-red-500 transition-colors hover:bg-red-600"
+                        >
+                            <Square className="h-4 w-4 fill-white text-white" />
+                        </button>
+                    ) : (
+                        <Button
+                            onClick={() => onSendMessage(query)}
+                            disabled={!query.trim() || !hasSheets}
+                            className="h-[80px] shrink-0"
+                        >
                             <SendHorizontal className="h-5 w-5" />
-                        )}
-                    </Button>
+                        </Button>
+                    )}
                 </div>
             </div>
         </div>

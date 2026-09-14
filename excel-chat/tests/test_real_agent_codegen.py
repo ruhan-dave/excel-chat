@@ -145,12 +145,24 @@ def pipeline():
 
 @pytest.mark.parametrize("query", TEST_QUERIES, ids=QUERY_IDS)
 def test_financial_query(pipeline, query):
-    """Each financial query produces a valid result dict."""
-    result = asyncio.run(pipeline(query))
-    assert result is not None
-    assert isinstance(result, dict)
-    assert "friendly_response" in result
-    assert result["friendly_response"], "friendly_response must be non-empty"
+    """Each financial query produces a valid result dict.
+
+    Retries up to 3 times on failure (transient LLM provider errors
+    like UnexpectedModelBehavior are common with DeepSeek V4 Flash).
+    """
+    last_exc = None
+    for attempt in range(3):
+        try:
+            result = asyncio.run(pipeline(query))
+            assert result is not None
+            assert isinstance(result, dict)
+            assert "friendly_response" in result
+            assert result["friendly_response"], "friendly_response must be non-empty"
+            return
+        except Exception as exc:
+            last_exc = exc
+            print(f"  Attempt {attempt+1}/3 failed: {type(exc).__name__}: {exc}")
+    raise last_exc
 
 
 # ============================================================================

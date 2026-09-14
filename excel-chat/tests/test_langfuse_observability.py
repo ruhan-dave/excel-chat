@@ -279,12 +279,23 @@ def test_pipeline_reasoning_audit_trail(excel_available, llm_available, query, r
       - Friendly response generated
     """
     query_id = request.node.callspec.id
-    user_id = f"test-pipe-{uuid.uuid4().hex[:8]}"
-    pipe = _build_pipeline(user_id=user_id)
 
-    t0 = time.time()
-    result, _trace_id = _run_query_traced(pipe, query, query_id, user_id)
-    wall_time = time.time() - t0
+    # Retry up to 3 times — transient LLM provider errors (UnexpectedModelBehavior,
+    # UsageLimitExceeded on complex queries) are common with DeepSeek V4 Flash.
+    last_exc = None
+    for attempt in range(3):
+        user_id = f"test-pipe-{uuid.uuid4().hex[:8]}"
+        pipe = _build_pipeline(user_id=user_id)
+        try:
+            t0 = time.time()
+            result, _trace_id = _run_query_traced(pipe, query, query_id, user_id)
+            wall_time = time.time() - t0
+            break
+        except Exception as exc:
+            last_exc = exc
+            print(f"  [{query_id}] Attempt {attempt+1}/3 failed: {type(exc).__name__}: {exc}")
+    else:
+        raise last_exc
 
     # --- Structure ---
     assert isinstance(result, dict), "Pipeline must return a dict"

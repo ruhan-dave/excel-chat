@@ -111,10 +111,10 @@ def test_query_wages_and_salaries(uploaded_data):
 
 
 def test_query_percentage_calculation(uploaded_data):
-    """Query for percentage of public grants returns a non-empty answer."""
+    """Query for percentage of grants to public corporations returns a non-empty answer."""
     r = requests.get(
         f"{BASE_URL}/query",
-        params={"query": "What percentage of grants are from public sources?"},
+        params={"query": "What percentage of grants went to public corporations in 2020?"},
         headers={"X-User-ID": "ci-test"},
         timeout=300,
     )
